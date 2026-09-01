@@ -27,6 +27,27 @@ runs, so the reasoning doesn't get reconstructed from memory after the fact.
   bug or leaked credential in this Function can't be used to touch anything else in
   the subscription.
 
+- **Scheduled Query (Log) Alert instead of a direct Action Group call**: the spec's
+  "sends a notification via Action Group" sounds like the Function should call the
+  Action Group directly, but the Action Group trigger APIs need Monitor-related RBAC
+  on the caller — which would mean giving the Function's identity more than the
+  single Cost Management Reader role the spec insists on. Instead, the Function just
+  logs a plain-English `"AnomalyDetected: ..."` trace to Application Insights (that
+  only needs the connection string, no RBAC at all), and a `scheduledQueryRules`
+  Log Alert watches for that trace pattern and fires the Action Group. Same outcome
+  (email on anomaly, zero extra services), but the Function's identity stays exactly
+  as scoped as the spec describes.
+- **Host storage via account key, not identity-based connection**: Azure Functions'
+  own internal storage (`AzureWebJobsStorage`, used for triggers/leases, separate
+  from the dedupe-state blob) can be wired with either a connection string or an
+  identity-based connection. Identity-based would need 2-3 more RBAC roles
+  (Storage Blob/Queue/Table Data Contributor) on the Function's identity. Since the
+  spec explicitly enumerates exactly one role assignment (Cost Management Reader),
+  I used the account-key connection string instead — it's an app setting (encrypted
+  at rest, not a secret in source), and it's the default pattern in `azd`'s own
+  Functions templates. Worth revisiting later if you want to hardcode zero secrets
+  anywhere, but it keeps this stage matching the spec as written.
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -37,6 +58,12 @@ runs, so the reasoning doesn't get reconstructed from memory after the fact.
 | `winget install microsoft.azd` *(failed — winget not on PATH)* | First attempt to install the Azure Developer CLI; fell back to Microsoft's official install script. |
 | `Invoke-RestMethod 'https://aka.ms/install-azd.ps1' \| Invoke-Expression` | Installed `azd` 1.32.0 via Microsoft's official installer (MSI, user-scoped install under `AppData\Local\Programs`). |
 | `azd init -m -e dev --no-prompt` | Scaffolded a minimal `azd` project (`azure.yaml` only, environment named `dev`) — the "Bicep starter pattern" the spec calls for, extended from rather than hand-rolled. |
+| `az login` | Switched the `az` CLI from a stale former-employer login to `jonathan@realitylvn.com`, landing on the correct "LVN Subscription" by default. |
+| `azd auth login --check-status` | Confirmed `azd` was already authenticated as the same correct account (separate credential cache from `az`, but already in sync). |
+| `az role definition list --name "Cost Management Reader"` | Looked up the built-in role's exact GUID (`72fafb9e-0641-4937-9268-a91bfd8191a3`) instead of guessing it, before hardcoding it into the role assignment in Bicep. |
+| `az bicep install` | Installed the Bicep CLI (not present yet) so `az bicep build` could run. |
+| `az bicep build --file infra/main.bicep` | Compiled the drafted template to check for syntax/type errors before anyone looks at a `what-if` plan — came back clean. |
+| `azd env set AZURE_LOCATION eastus2` | Set the deployment region. Unlike the budget amount, threshold %, and notification email, region is a low-stakes technical default, not a personal/business decision, so set directly rather than asked. |
 
 ## AZ-900 / AZ-104 domain mapping
 
