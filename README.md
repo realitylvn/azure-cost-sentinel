@@ -39,12 +39,12 @@ today doesn't match.
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {
   'fontSize':'14px',
-  'primaryColor':'#dce8fa',
-  'primaryTextColor':'#12233d',
-  'primaryBorderColor':'#5b7fbf',
-  'lineColor':'#7d8590',
-  'textColor':'#12233d',
-  'edgeLabelBackground':'#ffffff'
+  'primaryColor':'#252d3a',
+  'primaryTextColor':'#e6e9ef',
+  'primaryBorderColor':'#5b6675',
+  'lineColor':'#8b95a5',
+  'textColor':'#e6e9ef',
+  'edgeLabelBackground':'#252d3a'
 }}}%%
 flowchart LR
     timer([Timer trigger<br/>08:00 UTC daily]) --> fn[Function App<br/>Python 3.11 · Consumption]
@@ -60,8 +60,8 @@ flowchart LR
 
     budget[Budget<br/>80% of monthly cap] -.->|email| mail
 
-    classDef built fill:#c7ddf5,stroke:#3f6fb5,stroke-width:2px,color:#12233d;
-    classDef ext fill:#eef1f5,stroke:#9aa4b2,color:#12233d;
+    classDef built fill:#1e3a5f,stroke:#5b8fd6,stroke-width:2px,color:#eaf2fb;
+    classDef ext fill:#252d3a,stroke:#5b6675,color:#e6e9ef;
     class fn,blob built;
     class timer,cm,ai,law,alert,ag,mail,budget ext;
 ```
