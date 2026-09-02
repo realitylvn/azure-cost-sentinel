@@ -72,12 +72,13 @@ alert · Action Group · Consumption Budget
 
 **Auth:** The tool's core access — the Cost Management API — is secured entirely by the
 Function's system-assigned **managed identity**, scoped to **Cost Management Reader on the
-resource group** (not the subscription, not a broader role). No credentials in code. The
-one connection string present, the Functions host's own runtime storage
-(`AzureWebJobsStorage`), uses a platform-managed account key delivered as an app setting —
-`azd`'s standard default, not a hand-managed secret. Switching that to an identity-based
-connection would mean granting the identity three more storage data roles than the tool
-needs; see [`REVIEW.md`](REVIEW.md) for that trade-off.
+resource group** (not the subscription, not a broader role). No credentials in code, and
+that is the identity's **only** role assignment. Storage is reached with account-key
+connection strings delivered as app settings — the Functions host's own runtime storage
+(`AzureWebJobsStorage`, `azd`'s standard default) and the small dedupe-state blob
+(`STATE_STORAGE_CONNECTION_STRING`, same account and key). Giving the identity storage
+data-plane roles instead would widen it past the single assignment the design calls for,
+to write one timestamp; see [`REVIEW.md`](REVIEW.md) for that trade-off.
 
 ## Environment
 
