@@ -387,6 +387,13 @@ before treating this as closed.
 - `.gitignore` now excludes `docs/superpowers/` (internal planning docs are kept
   locally, not published).
 
+**Outcome:** merged to `main` (squash `b562d28`), provisioned + deployed. Managed
+identity holds only `Cost Management Reader` on the RG. Action Group email
+delivery re-confirmed live 2026-09-02 23:46 UTC (`test-notifications` →
+`Status: Succeeded`, email received). The cost-query-scope question above is the
+one remaining check — unchanged from when the project was first marked done, and
+gated on an unthrottled scheduled run.
+
 ## CLI command log
 
 | Command | What it did / why |
