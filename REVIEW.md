@@ -232,6 +232,55 @@ in the Log Analytics workspace tell the whole story:
   `/api/deployments` works; everything else has to come from the runtime admin
   API or Log Analytics.
 
+## Stage 4 — verification & finishing
+
+### Testing the alert path when the subscription never actually spikes
+
+Real spend on this subscription is ~$0.19/day — comfortably under the
+`MINIMUM_BASELINE_USD = 1.0` guard, so the Function will *always* take the
+"trailing average near zero, skipping" branch and never emit `AnomalyDetected` on
+its own. That's correct behaviour (a percentage delta on pennies is noise), but it
+means the anomaly → alert → email path can't be tested by waiting. Split it in two:
+
+- **Action Group email delivery** — `az monitor action-group test-notifications
+  create` with an explicit email receiver. Azure's built-in test; returned
+  `MechanismType: Email, Status: Succeeded`. Confirms the Action Group and the
+  address work without any alert rule involved.
+- **Alert rule (query + scope)** — POSTed a synthetic telemetry item straight to
+  the App Insights ingestion endpoint (`.../v2.1/track`, `MessageData`,
+  `message: "AnomalyDetected: 999% above 7-day average (SYNTHETIC…)"`). Only needs
+  the instrumentation key, no RBAC. Confirmed it landed in `AppTraces`, then the
+  `scheduledQueryRules` rule (PT1H evaluation) picked it up and fired the Action
+  Group. `autoMitigate: true` cleared it afterward.
+
+Together that covers the whole chain the Function depends on, without deploying any
+test-only code into `function_app.py`.
+
+### Removed the stale `dev` azd environment
+
+`azd env remove dev --force`. The original `dev` environment (from `azd init`)
+never completed a provision — the first attempt died at the Y1 quota preflight, and
+everything was renamed to `cost-sentinel-dev` before any resource was created. So
+there was nothing in Azure to clean up; `azd env remove` only deletes the local
+`.azure/dev/` folder (which is gitignored anyway). This is why it never appeared in
+the portal — an azd environment is local CLI state, not an Azure resource.
+
+### CI: validation now, OIDC deploy pipeline deferred
+
+`.github/workflows/validate.yml` runs on every PR/push: `az bicep build` plus a
+job that installs the pinned requirements and asserts `function_app.app.get_functions()`
+returns exactly `['cost_anomaly_check']`. Those are precisely the two failures that
+cost two deploy cycles here, and both are invisible to `azd deploy`'s exit code —
+so they're worth a cheap gate that runs without any cloud credentials.
+
+The fuller move — `azd pipeline config` to provision an Entra app registration,
+a federated credential trusting this GitHub repo, and a deploy-on-push workflow —
+is deliberately deferred. It's the stronger AZ-104 story, but it means a
+deploy-capable identity with a standing trust relationship to a *public* repo, and
+an Entra object to keep track of, for a project that one person deploys by hand in
+seconds. Documented here so the reasoning is on record; revisit if the deploy
+cadence ever justifies it.
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -263,6 +312,10 @@ in the Log Analytics workspace tell the whole story:
 | `azd deploy --no-prompt` (Deploy #2 fix) | Redeployed the function with pinned `requirements.txt` and the `azure-mgmt-resource` dependency gone. |
 | `curl -H "x-functions-key: <masterKey>" .../admin/functions` (post-fix) | The authoritative "did it actually work" check. Returned the `cost_anomaly_check` entry with its `timerTrigger` binding — non-empty at last. |
 | `az monitor log-analytics query -w <customerId> --analytics-query "AppExceptions \| ..."` | Pulled the Function host's own startup logs straight from the workspace. Showed the pre-fix `ImportError`/`Worker failed to index functions` and the post-fix `1 functions loaded` / `Found: Host.Functions.cost_anomaly_check`. The `az monitor app-insights query` equivalent returned nothing for this workspace-based component — the workspace query is what works. |
+| `az monitor action-group test-notifications create -g ... --action-group-name ag-... -a email primary <addr> usecommonalertschema --alert-type budget` | Azure's built-in Action Group test. Returned `Status: Succeeded` for the email mechanism — confirms delivery without needing an alert to fire. Note: it does *not* read the group's existing receivers, you pass them explicitly with `-a`. |
+| `python … urllib POST https://<region>.in.applicationinsights.azure.com/v2.1/track` | Injected a synthetic `AnomalyDetected` `MessageData` trace using just the instrumentation key (no RBAC), to test the `scheduledQueryRules` alert without deploying test code. Landed in `AppTraces`; the rule fired the Action Group on its next evaluation. |
+| `azd env remove dev --force` | Deleted the stale local `dev` azd environment. Local-only operation — `.azure/dev/` was gitignored and never provisioned anything. |
+| `az extension add -n application-insights` / `-n log-analytics` / `-n scheduled-query` | Installed the CLI extensions these diagnostics need — they prompt interactively (and so fail under automation) if missing. |
 
 ## AZ-900 / AZ-104 domain mapping
 
@@ -283,3 +336,7 @@ in the Log Analytics workspace tell the whole story:
   support it, Premium does) is core AZ-104 "implement and manage storage" /
   availability content — the kind of specific plan-tier capability detail that's easy
   to get wrong on the exam without having hit it in a real quota form.
+- **Deployment & IaC**: the whole `infra/` tree is Bicep provisioned through `azd`,
+  and `.github/workflows/validate.yml` gates every change on `az bicep build` — the
+  AZ-104 "automate deployment of resources" objective, and the practical half of it
+  (a template that compiles is not a template that works — see both Deploy sections).
