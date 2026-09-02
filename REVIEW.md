@@ -74,6 +74,34 @@ runs, so the reasoning doesn't get reconstructed from memory after the fact.
   if the Function misses a run during a rare zone outage, nothing breaks, it just
   checks again on the next schedule.
 
+## Naming & tagging correction (pre-flight, before anything was provisioned)
+
+The Bicep was originally drafted using azd's default `dev` environment name and
+resource names built from an opaque `uniqueString()` token alone (`plan-vsgvle7c2q6pe`,
+`func-vsgvle7c2q6pe`, etc.). That works, but it's a governance problem the moment a
+second Azure project shares this subscription: every resource group would be named
+generically, nothing in the portal would say which project a resource belongs to, and
+there'd be no way to query "everything belonging to this portfolio" across projects.
+This is exactly what Microsoft's Cloud Adoption Framework naming guidance exists to
+prevent — `<type>-<project-slug>-<environment>` makes every resource
+self-describing, and a shared `portfolio`/`project`/`environment` tag set makes the
+whole portfolio queryable later (the planned Ops Dashboard project depends on this).
+
+Caught and fixed before `azd provision` ever ran, so this was a rename, not a
+migration:
+- azd environment renamed from `dev` to `cost-sentinel-dev` (`azd env new`, values
+  copied over, old `dev` env left in place for Jonathan to remove manually).
+- Resource names in `resources.bicep` changed from `<type>-${resourceToken}` to
+  `<type>-${environmentName}`, so names now read `rg-cost-sentinel-dev`,
+  `plan-cost-sentinel-dev`, `log-cost-sentinel-dev`, etc. Only the storage account and
+  Function App keep a short uniqueness suffix appended, since those two have globally
+  -unique naming requirements the rest of these resource types don't.
+- Added `portfolio`, `project`, and `environment` tags (in addition to azd's own
+  `azd-env-name`) to every taggable resource. Two resources — `Microsoft.Consumption/budgets`
+  and the RBAC role assignment — have no `tags` property in their ARM schema at all
+  (confirmed by an actual failed build attempt with `tags:` added, not assumed), so
+  naming is the only convention signal those two can carry.
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -94,6 +122,9 @@ runs, so the reasoning doesn't get reconstructed from memory after the fact.
 | `azd env set AZURE_SUBSCRIPTION_ID ...` | `azd provision --preview` requires this explicitly even though `az` already had the right subscription selected — azd reads its own environment, not the ambient `az` context. |
 | `azd provision --preview` | The what-if dry run — compiled and validated the template against the real subscription with no changes applied. Failed preflight on `SubscriptionIsOverQuotaForSku` for the Y1 App Service plan (see "Platform quirks" above). Quota increase requested via Portal, pending a support engineer — rerun this once it clears. |
 | `az vm list-usage --location <region>` (several regions) | Checked Compute VM quota to rule out a Compute-side cause — all healthy, confirming the blocker was App Service-specific quota instead. |
+| `azd env new cost-sentinel-dev` / `azd env select cost-sentinel-dev` | Replaced the generic `dev` environment name with the portfolio naming convention before anything was provisioned; old `dev` env left in place, not deleted. |
+| `azd env set ...` (x6, repeated on the new environment) | Re-applied all previously-configured values (region, thresholds, budget, email, subscription) onto `cost-sentinel-dev` so nothing was lost in the rename. |
+| `az deployment sub what-if` (rerun after naming/tagging fix) | Confirmed all 12 resources now carry the correct `<type>-cost-sentinel-dev` names and the four portfolio tags, before touching `azd provision`. |
 
 ## AZ-900 / AZ-104 domain mapping
 

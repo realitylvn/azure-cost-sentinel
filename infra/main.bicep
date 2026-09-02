@@ -21,8 +21,17 @@ param budgetAmountUsd int
 @description('Email address that receives the Budget alert and anomaly notifications.')
 param notificationEmail string
 
+@description('Portfolio project slug, used only for the "project" tag value - see azure-naming-conventions.md.')
+param projectSlug string = 'cost-sentinel'
+
+@description('Environment tag value - see azure-naming-conventions.md. Distinct from the azd environment name.')
+param environmentTag string = 'dev'
+
 var tags = {
   'azd-env-name': environmentName
+  portfolio: 'azure-devops-portfolio'
+  project: projectSlug
+  environment: environmentTag
 }
 
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {

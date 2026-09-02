@@ -1,7 +1,7 @@
 @description('Azure region for all resources.')
 param location string
 
-@description('azd environment name, used only to build the unique resource token.')
+@description('azd environment name (e.g. cost-sentinel-dev) - drives resource naming per azure-naming-conventions.md, and seeds the short token used only where global uniqueness is required.')
 param environmentName string
 
 param tags object
@@ -24,11 +24,16 @@ param budgetStartDate string = utcNow('yyyy-MM-01')
 @description('Built-in "Cost Management Reader" role definition ID (verified via az role definition list).')
 var costManagementReaderRoleId = '72fafb9e-0641-4937-9268-a91bfd8191a3'
 
+// Only storage accounts and Function Apps need azd's uniqueness token appended -
+// both have globally-unique naming requirements the rest of these resources don't.
+// See azure-naming-conventions.md.
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
+var shortToken = substring(resourceToken, 0, 6)
 var stateContainerName = 'state'
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: 'st${resourceToken}'
+  // Storage account names: lowercase alphanumeric only, no hyphens, <=24 chars.
+  name: 'st${toLower(replace(environmentName, '-', ''))}${shortToken}'
   location: location
   tags: tags
   kind: 'StorageV2'
@@ -54,7 +59,7 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 }
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
-  name: 'log-${resourceToken}'
+  name: 'log-${environmentName}'
   location: location
   tags: tags
   properties: {
@@ -69,7 +74,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 }
 
 resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
-  name: 'appi-${resourceToken}'
+  name: 'appi-${environmentName}'
   location: location
   tags: tags
   kind: 'web'
@@ -81,7 +86,7 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: 'plan-${resourceToken}'
+  name: 'plan-${environmentName}'
   location: location
   tags: tags
   kind: 'functionapp'
@@ -95,7 +100,8 @@ resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
 }
 
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
-  name: 'func-${resourceToken}'
+  // Web App hostnames are globally unique, so this gets the short token too.
+  name: 'func-${environmentName}-${shortToken}'
   location: location
   tags: union(tags, { 'azd-service-name': 'function' })
   kind: 'functionapp,linux'
@@ -156,7 +162,7 @@ resource costManagementReaderAssignment 'Microsoft.Authorization/roleAssignments
 }
 
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
-  name: 'ag-${resourceToken}'
+  name: 'ag-${environmentName}'
   location: 'global'
   tags: tags
   properties: {
@@ -178,7 +184,7 @@ resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
 // connection string, no RBAC), and this Log Alert watches for that trace and fires
 // the Action Group. Keeps the identity's privilege exactly as scoped in the spec.
 resource anomalyAlertRule 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = {
-  name: 'alert-anomaly-${resourceToken}'
+  name: 'alert-anomaly-${environmentName}'
   location: location
   tags: tags
   properties: {
@@ -214,8 +220,11 @@ resource anomalyAlertRule 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = 
   }
 }
 
+// Microsoft.Consumption/budgets has no tags property in its ARM schema at all -
+// confirmed via a failed `tags:` build attempt, not assumed. Naming is the only way
+// this resource can carry the convention.
 resource budget 'Microsoft.Consumption/budgets@2023-11-01' = {
-  name: 'budget-${resourceToken}'
+  name: 'budget-${environmentName}'
   properties: {
     category: 'Cost'
     amount: budgetAmountUsd
