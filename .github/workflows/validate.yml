@@ -19,7 +19,7 @@ jobs:
   bicep:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build Bicep templates
         run: |
           az bicep install
@@ -29,8 +29,8 @@ jobs:
   function:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"  # must match linuxFxVersion in infra/resources.bicep
       - name: Install pinned dependencies
