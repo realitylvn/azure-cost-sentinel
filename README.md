@@ -139,11 +139,12 @@ every day on a healthy subscription):
 No anomaly: 4.1% vs 25.0% threshold.
 ```
 
-Near-zero subscription — the percentage check is skipped rather than firing on noise:
+Low-spend subscription — the trailing average is under `MINIMUM_BASELINE_USD`, so the
+percentage check is skipped rather than firing on noise:
 
 ```
-Trailing 7-day average is near zero - skipping the percentage-based check to avoid a
-divide-by-zero-shaped false alarm.
+Trailing 7-day average is below the $1/day baseline - skipping the percentage-based
+check to avoid a divide-by-zero-shaped false alarm.
 ```
 
 Anomaly detected — the `WARNING`-level line the function logs, which the alert rule
