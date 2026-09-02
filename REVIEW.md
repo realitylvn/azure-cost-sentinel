@@ -124,6 +124,20 @@ Role assignment and Budget hadn't been created yet when the deployment stopped, 
 `azd provision` should pick up cleanly on the next run (idempotent — already-created
 resources are left alone).
 
+## Stage 3 — Function code
+
+- **Subscription ID discovered at runtime, not an app setting**: `resources.bicep`
+  never wired an `AZURE_SUBSCRIPTION_ID` app setting, so the Function calls
+  `SubscriptionClient.subscriptions.list()` with its own managed identity and takes
+  the one subscription it can see (Cost Management Reader only grants visibility
+  into the subscription this RG lives in). Avoids an infra redeploy just to pass
+  through a value the identity can already discover itself.
+- **Sampling disabled in `host.json`**: Application Insights sampling is off
+  entirely. The one thing the whole alerting design depends on is the single daily
+  `AnomalyDetected` trace actually arriving - adaptive sampling could silently drop
+  it, and there would be no symptom until an alert quietly failed to fire.
+- Not deployed yet - this is the Stage 3 checkpoint (code written, before `azd deploy`).
+
 ## CLI command log
 
 | Command | What it did / why |

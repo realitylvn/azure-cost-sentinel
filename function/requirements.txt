@@ -1,0 +1,5 @@
+azure-functions
+azure-identity
+azure-mgmt-costmanagement
+azure-mgmt-resource
+azure-storage-blob
