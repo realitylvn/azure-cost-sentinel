@@ -43,7 +43,7 @@ def evaluate_anomaly(
     threshold_pct: float,
     minimum_baseline_usd: float,
     cooldown_days: int,
-    last_alert_utc: "datetime | None",
+    last_alert_utc: datetime | None,
     now: datetime,
     required_days: int = REQUIRED_DAYS,
 ) -> Decision:
@@ -72,7 +72,7 @@ def evaluate_anomaly(
     return Decision("anomaly", delta_pct)
 
 
-def _query_daily_cost(credential, subscription_id: str, days: int = 8):
+def _query_daily_cost(credential, subscription_id: str, days: int = REQUIRED_DAYS):
     """Trailing `days` complete days of subscription spend, oldest first.
     Never includes today - Cost Management API data lags, so today is always partial."""
     client = CostManagementClient(credential)
