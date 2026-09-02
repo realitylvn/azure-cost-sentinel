@@ -2,9 +2,9 @@
 
 > Watches an Azure subscription's spend and flags anomalies in plain English before they become a surprise bill.
 
+[![validate](https://github.com/realitylvn/azure-cost-sentinel/actions/workflows/validate.yml/badge.svg)](https://github.com/realitylvn/azure-cost-sentinel/actions/workflows/validate.yml)
 ![Azure](https://img.shields.io/badge/Azure-Functions-0078D4?logo=microsoftazure&logoColor=white)
 ![Bicep](https://img.shields.io/badge/IaC-Bicep-0078D4)
-![GitHub Actions](https://img.shields.io/badge/CI-validate-2088FF?logo=githubactions&logoColor=white)
 ![Cost](https://img.shields.io/badge/monthly_cost-under_%240.05-brightgreen)
 
 ## The problem
