@@ -15,6 +15,9 @@ param anomalyThresholdPct int = 20
 @description('Days to suppress repeat alerts while an anomaly is ongoing.')
 param alertCooldownDays int = 3
 
+@description('Minimum trailing-average daily spend (USD) before the percentage check runs. Default $1/day; lower it to detect anomalies on a low-spend subscription.')
+param minimumBaselineUsd string = '1.0'
+
 @description('Monthly Azure Budget amount, in USD. No default on purpose - this is a personal spending decision, set it via azd env set.')
 param budgetAmountUsd int
 
@@ -49,6 +52,7 @@ module resources 'resources.bicep' = {
     tags: tags
     anomalyThresholdPct: anomalyThresholdPct
     alertCooldownDays: alertCooldownDays
+    minimumBaselineUsd: minimumBaselineUsd
     budgetAmountUsd: budgetAmountUsd
     notificationEmail: notificationEmail
   }

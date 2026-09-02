@@ -14,6 +14,9 @@
     "alertCooldownDays": {
       "value": "${ALERT_COOLDOWN_DAYS}"
     },
+    "minimumBaselineUsd": {
+      "value": "${MINIMUM_BASELINE_USD=1.0}"
+    },
     "budgetAmountUsd": {
       "value": "${BUDGET_AMOUNT_USD}"
     },

@@ -2,9 +2,9 @@ name: validate
 
 # Validation only - no Azure credentials, no deploy. Provisioning and deployment
 # are done from the workstation with `azd provision` / `azd deploy`. This workflow
-# just catches the two failure modes that bit this project during development:
-# a Bicep template that doesn't compile, and a function that doesn't import (which
-# a plain `azd deploy` reports as success while silently indexing zero functions).
+# catches the failure modes that bit this project during development: a Bicep
+# template that doesn't compile, and a function that doesn't import (which a plain
+# `azd deploy` reports as success while silently indexing zero functions).
 
 on:
   push:
@@ -26,25 +26,16 @@ jobs:
           az bicep build --file infra/main.bicep --stdout > /dev/null
           echo "Bicep compiled clean."
 
-  function:
+  tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"  # must match linuxFxVersion in infra/resources.bicep
-      - name: Install pinned dependencies
-        run: pip install -r function/requirements.txt
-      - name: Assert the function imports and indexes
-        working-directory: function
-        env:
-          # _query_daily_cost / DefaultAzureCredential are never called here - this
-          # only imports the module and runs the decorator indexing the worker does.
-          AZURE_SUBSCRIPTION_ID: "00000000-0000-0000-0000-000000000000"
-        run: |
-          python - <<'PY'
-          import function_app
-          names = [f.get_function_name() for f in function_app.app.get_functions()]
-          assert names == ["cost_anomaly_check"], f"unexpected functions: {names}"
-          print("Indexed:", names)
-          PY
+      - name: Install test + pinned runtime dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run unit tests
+        # Covers the anomaly decision logic and asserts the worker indexes the
+        # trigger (tests/test_function_indexes.py).
+        run: pytest -q

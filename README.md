@@ -81,10 +81,11 @@ figures, so it stays meaningful without disclosing real spend.
 - **No per-resource attribution.** It tells you *that* subscription spend jumped, not
   *which* resource caused it. Grouping the Cost Management query by `ResourceId` to name the
   top mover in the alert is the obvious next iteration.
-- **Quiet on near-zero subscriptions by design.** If the trailing average is under
-  $1/day, the percentage check is skipped entirely — a $0.02 → $0.09 day is "350% above
-  average" and tells you nothing. On a subscription that only ever spends pennies, the tool
-  intentionally stays silent and leans on the Budget backstop instead.
+- **Quiet on near-zero subscriptions by default.** If the trailing average is under
+  `MINIMUM_BASELINE_USD` (default $1/day), the percentage check is skipped entirely — a
+  $0.02 → $0.09 day is "350% above average" and tells you nothing. On a subscription that
+  only ever spends pennies, the tool leans on the Budget backstop instead. Lower the
+  setting to opt a low-spend subscription back into percentage-based detection.
 - **No operator console.** In a real deployment a dashboard for tuning thresholds and
   reviewing history would sit behind Entra ID SSO. It's omitted here so the repo stays
   publicly browsable with nothing to secure.
@@ -98,6 +99,7 @@ a resource-group-scoped role assignment in it.
 azd env new cost-sentinel-dev
 azd env set ANOMALY_THRESHOLD_PCT 25       # % over trailing average that counts as an anomaly
 azd env set ALERT_COOLDOWN_DAYS 3          # suppress repeat emails for this many days
+azd env set MINIMUM_BASELINE_USD 1.0       # skip the % check below this trailing daily average
 azd env set BUDGET_AMOUNT_USD 5            # hard monthly cap; Budget emails at 80% of this
 azd env set NOTIFICATION_EMAIL you@example.com
 azd env set AZURE_LOCATION eastus2
@@ -154,13 +156,27 @@ free; one execution/day here). Log Analytics ingestion is capped at 1 GB/day and
 at 30 days. Estimated cost if left running and forgotten for a year: **under $0.05/month**,
 and the provisioned Budget emails at 80% of a $5 cap regardless.
 
+## Tests
+
+`pytest` — [`tests/test_anomaly_logic.py`](tests/test_anomaly_logic.py) covers the pure
+decision function (`evaluate_anomaly`) branch by branch: anomaly, within-threshold,
+below-baseline skip, cooldown suppression, cooldown expiry, insufficient data.
+[`tests/test_function_indexes.py`](tests/test_function_indexes.py) asserts the worker can
+import the module and register the trigger. All I/O — the Cost Management query, blob state,
+logging — stays in the timer entrypoint, so the logic tests need no Azure and no clock.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## CI
 
 [`.github/workflows/validate.yml`](.github/workflows/validate.yml) runs on every PR and
-push: it compiles the Bicep templates and asserts the function actually imports and indexes
-its trigger. That second check exists because a plain `azd deploy` reports success even when
-the Python worker fails to load and registers zero functions — a real failure mode this
-project hit twice ([`REVIEW.md`](REVIEW.md)).
+push: it compiles the Bicep templates and runs the test suite (including the index check).
+That last one matters because a plain `azd deploy` reports success even when the Python
+worker fails to load and registers zero functions — a real failure mode this project hit
+twice ([`REVIEW.md`](REVIEW.md)).
 
 Deployment is done from the workstation with `azd`. Moving provision/deploy into GitHub
 Actions behind an OIDC federated credential (`azd pipeline config`) is a planned follow-up —

@@ -12,6 +12,9 @@ param anomalyThresholdPct int
 @description('Days to suppress repeat alerts while an anomaly is ongoing.')
 param alertCooldownDays int
 
+@description('Minimum trailing-average daily spend (USD) before the percentage check runs. Below this, a percentage delta is noise. String so it can carry a sub-dollar value.')
+param minimumBaselineUsd string
+
 @description('Monthly Azure Budget amount, in USD.')
 param budgetAmountUsd int
 
@@ -153,6 +156,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'ALERT_COOLDOWN_DAYS'
           value: string(alertCooldownDays)
+        }
+        {
+          name: 'MINIMUM_BASELINE_USD'
+          value: minimumBaselineUsd
         }
         {
           name: 'STATE_STORAGE_ACCOUNT_NAME'

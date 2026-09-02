@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import azure.functions as func
@@ -13,9 +14,62 @@ app = func.FunctionApp()
 
 STATE_BLOB_NAME = "last-alert.json"
 
-# Below this trailing-average daily spend, a percentage delta is meaningless noise
-# (a $0.01 -> $0.05 day reads as "400% above average" and tells us nothing real).
-MINIMUM_BASELINE_USD = 1.0
+# Full days of history the check needs before it will evaluate: 7 trailing days
+# to average over, plus yesterday to compare against them.
+REQUIRED_DAYS = 8
+
+# Default floor for the trailing average, overridable via the MINIMUM_BASELINE_USD
+# app setting. Below this, a percentage delta is meaningless noise (a $0.01 -> $0.05
+# day reads as "400% above average" and tells us nothing real).
+DEFAULT_MINIMUM_BASELINE_USD = 1.0
+
+
+@dataclass(frozen=True)
+class Decision:
+    """The outcome of evaluating one day's spend against its trailing history.
+
+    outcome is one of: "insufficient_data", "low_baseline", "no_anomaly",
+    "suppressed", "anomaly". delta_pct is the percentage above the trailing
+    average, present whenever it could be computed (the last three outcomes).
+    """
+
+    outcome: str
+    delta_pct: float | None = None
+
+
+def evaluate_anomaly(
+    daily_costs,
+    *,
+    threshold_pct: float,
+    minimum_baseline_usd: float,
+    cooldown_days: int,
+    last_alert_utc: "datetime | None",
+    now: datetime,
+    required_days: int = REQUIRED_DAYS,
+) -> Decision:
+    """Decide whether a run should alert. Pure: no I/O, no clock, no globals.
+
+    daily_costs is oldest-first and its final element is yesterday's spend; the
+    rest form the trailing window.
+    """
+    if len(daily_costs) < required_days:
+        return Decision("insufficient_data")
+
+    *history, latest_cost = daily_costs
+    trailing_avg = sum(history) / len(history)
+
+    if trailing_avg < minimum_baseline_usd:
+        return Decision("low_baseline")
+
+    delta_pct = ((latest_cost - trailing_avg) / trailing_avg) * 100
+
+    if delta_pct <= threshold_pct:
+        return Decision("no_anomaly", delta_pct)
+
+    if last_alert_utc and (now - last_alert_utc) < timedelta(days=cooldown_days):
+        return Decision("suppressed", delta_pct)
+
+    return Decision("anomaly", delta_pct)
 
 
 def _query_daily_cost(credential, subscription_id: str, days: int = 8):
@@ -69,6 +123,20 @@ def _get_last_alert_time(container):
     return datetime.fromisoformat(data["last_alert_utc"])
 
 
+def _read_last_alert_time(container):
+    """_get_last_alert_time, but a storage failure returns None instead of raising.
+
+    The dedupe timestamp is a best-effort convenience: if we can't read it, the
+    worst case is one duplicate email, which beats crashing a run that might need
+    to alert. The read happens every run now, not just on anomaly days.
+    """
+    try:
+        return _get_last_alert_time(container)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(f"Could not read dedupe state, treating as no prior alert: {exc}")
+        return None
+
+
 def _set_last_alert_time(container, when: datetime) -> None:
     blob = container.get_blob_client(STATE_BLOB_NAME)
     blob.upload_blob(json.dumps({"last_alert_utc": when.isoformat()}), overwrite=True)
@@ -78,6 +146,9 @@ def _set_last_alert_time(container, when: datetime) -> None:
 def cost_anomaly_check(timer: func.TimerRequest) -> None:
     threshold_pct = float(os.environ.get("ANOMALY_THRESHOLD_PCT", "20"))
     cooldown_days = int(os.environ.get("ALERT_COOLDOWN_DAYS", "3"))
+    minimum_baseline_usd = float(
+        os.environ.get("MINIMUM_BASELINE_USD", str(DEFAULT_MINIMUM_BASELINE_USD))
+    )
     # Wired in by infra/resources.bicep from the azd environment. The managed
     # identity only holds Cost Management Reader on this one subscription anyway,
     # so there's nothing to "discover" - pass the ID it operates on as config and
@@ -87,7 +158,7 @@ def cost_anomaly_check(timer: func.TimerRequest) -> None:
     credential = DefaultAzureCredential()
 
     try:
-        daily = _query_daily_cost(credential, subscription_id, days=8)
+        daily = _query_daily_cost(credential, subscription_id, days=REQUIRED_DAYS)
     except AzureError as exc:
         logging.error(f"Cost Management API call failed, skipping this run: {exc}")
         return
@@ -95,40 +166,44 @@ def cost_anomaly_check(timer: func.TimerRequest) -> None:
         logging.error(f"Unexpected error querying cost data, skipping this run: {exc}")
         return
 
-    if len(daily) < 8:
-        logging.info("Insufficient data (fewer than 8 complete days) - skipping anomaly evaluation.")
-        return
+    now = datetime.now(timezone.utc)
+    container = _state_container(credential)
+    last_alert = _read_last_alert_time(container)
 
-    *history, latest = daily
-    trailing_avg = sum(cost for _, cost in history) / len(history)
-    latest_cost = latest[1]
+    decision = evaluate_anomaly(
+        [cost for _, cost in daily],
+        threshold_pct=threshold_pct,
+        minimum_baseline_usd=minimum_baseline_usd,
+        cooldown_days=cooldown_days,
+        last_alert_utc=last_alert,
+        now=now,
+    )
 
-    if trailing_avg < MINIMUM_BASELINE_USD:
+    if decision.outcome == "insufficient_data":
         logging.info(
-            "Trailing 7-day average is near zero - skipping the percentage-based "
+            f"Insufficient data (fewer than {REQUIRED_DAYS} complete days) - "
+            "skipping anomaly evaluation."
+        )
+    elif decision.outcome == "low_baseline":
+        logging.info(
+            f"Trailing {REQUIRED_DAYS - 1}-day average is below the "
+            f"${minimum_baseline_usd:g}/day baseline - skipping the percentage-based "
             "check to avoid a divide-by-zero-shaped false alarm."
         )
-        return
-
-    delta_pct = ((latest_cost - trailing_avg) / trailing_avg) * 100
-
-    if delta_pct <= threshold_pct:
-        logging.info(f"No anomaly: {delta_pct:.1f}% vs {threshold_pct}% threshold.")
-        return
-
-    container = _state_container(credential)
-    now = datetime.now(timezone.utc)
-    last_alert = _get_last_alert_time(container)
-
-    if last_alert and (now - last_alert) < timedelta(days=cooldown_days):
+    elif decision.outcome == "no_anomaly":
         logging.info(
-            f"Anomaly detected ({delta_pct:.0f}% above average) but suppressed - "
+            f"No anomaly: {decision.delta_pct:.1f}% vs {threshold_pct}% threshold."
+        )
+    elif decision.outcome == "suppressed":
+        logging.info(
+            f"Anomaly detected ({decision.delta_pct:.0f}% above average) but suppressed - "
             f"last alert was {(now - last_alert).days} day(s) ago, within the "
             f"{cooldown_days}-day cooldown."
         )
-        return
-
-    # This exact "AnomalyDetected" prefix is what infra/resources.bicep's
-    # scheduledQueryRules alert watches for - keep them in sync if this changes.
-    logging.warning(f"AnomalyDetected: {delta_pct:.0f}% above 7-day average")
-    _set_last_alert_time(container, now)
+    elif decision.outcome == "anomaly":
+        # This exact "AnomalyDetected" prefix is what infra/resources.bicep's
+        # scheduledQueryRules alert watches for - keep them in sync if this changes.
+        logging.warning(
+            f"AnomalyDetected: {decision.delta_pct:.0f}% above 7-day average"
+        )
+        _set_last_alert_time(container, now)

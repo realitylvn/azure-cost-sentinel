@@ -283,6 +283,41 @@ an Entra object to keep track of, for a project that one person deploys by hand 
 seconds. Documented here so the reasoning is on record; revisit if the deploy
 cadence ever justifies it.
 
+### Polish: pure decision function + unit tests + configurable baseline
+
+Two changes to make this portfolio-grade rather than just working:
+
+- **`evaluate_anomaly` extracted as a pure function.** The timer entrypoint was
+  one function doing cost query, trailing-average math, threshold + cooldown
+  decisions, blob state, and logging all inline — untestable without mocking
+  Azure. Pulled the decision logic into `evaluate_anomaly(daily_costs, *,
+  threshold_pct, minimum_baseline_usd, cooldown_days, last_alert_utc, now)`
+  returning a `Decision(outcome, delta_pct)`. No I/O, no clock, no globals. The
+  entrypoint now just gathers inputs, calls it, and acts on the outcome. Built
+  test-first: 7 tests (one per branch — anomaly, within-threshold, below-baseline,
+  suppressed-in-cooldown, alert-after-cooldown, insufficient-data, and
+  lower-baseline-lets-low-spend-through) written and watched fail before the
+  function existed. `tests/test_function_indexes.py` folds the old
+  "does it import and register the trigger" CI check into the same suite.
+- **`MINIMUM_BASELINE_USD` is now an app setting**, not a hardcoded `1.0`.
+  Threaded through `main.bicep` → `resources.bicep` like the other three tunables,
+  with `"${MINIMUM_BASELINE_USD=1.0}"` in `main.parameters.json` so it has a
+  working default without requiring `azd env set`. This subscription spends
+  ~$0.19/day, so with the old hardcoded floor the tool was *permanently* in
+  skip-mode; the setting lets a low-spend subscription opt back into
+  percentage-based detection.
+
+Side effect of the refactor: the dedupe-state blob is now read on every run (via
+`_read_last_alert_time`, which swallows a storage failure and returns `None`
+rather than crashing) instead of only on anomaly days. One extra small blob read
+daily, in exchange for the cooldown decision living inside the pure function and
+storage issues showing up in the logs every day instead of only during an incident.
+
+Redeployed and verified: `azd provision` landed `MINIMUM_BASELINE_USD=1.0`,
+`azd deploy` reindexed `cost_anomaly_check`, a manual invoke exercised the new code
+path (still 429 from the Cost Management API after a session of repeated manual
+triggers — handled cleanly, as designed).
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -318,6 +353,10 @@ cadence ever justifies it.
 | `python … urllib POST https://<region>.in.applicationinsights.azure.com/v2.1/track` | Injected a synthetic `AnomalyDetected` `MessageData` trace using just the instrumentation key (no RBAC), to test the `scheduledQueryRules` alert without deploying test code. Landed in `AppTraces`; the rule fired the Action Group on its next evaluation. |
 | `azd env remove dev --force` | Deleted the stale local `dev` azd environment. Local-only operation — `.azure/dev/` was gitignored and never provisioned anything. |
 | `az extension add -n application-insights` / `-n log-analytics` / `-n scheduled-query` | Installed the CLI extensions these diagnostics need — they prompt interactively (and so fail under automation) if missing. |
+| `pytest -q` (local + CI) | 8 tests: `evaluate_anomaly` branch coverage + the worker-indexes-the-trigger assertion. Runs with no Azure and no clock because all I/O stays in the timer entrypoint. |
+| `azd env set MINIMUM_BASELINE_USD 1.0` | Made the trailing-average floor a real tunable instead of a hardcoded constant — the fourth `azd env set` value, alongside threshold / cooldown / budget. |
+| `azd provision --preview --no-prompt` (baseline change) | Confirmed azd accepts the `"${MINIMUM_BASELINE_USD=1.0}"` default syntax in `main.parameters.json` and the template still compiles before applying. |
+| `azd provision` + `azd deploy` (baseline + refactor) | Landed the new app setting, redeployed the refactored function. Verified `MINIMUM_BASELINE_USD=1.0` on the app and `admin/functions` still non-empty. |
 
 ## AZ-900 / AZ-104 domain mapping
 

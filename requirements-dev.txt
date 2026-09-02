@@ -1,0 +1,5 @@
+# Local + CI test dependencies. NOT deployed - the function's own runtime
+# dependencies are function/requirements.txt (pulled in here so the unit tests
+# can import function_app).
+-r function/requirements.txt
+pytest==8.3.4
