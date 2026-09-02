@@ -210,7 +210,7 @@ in the Log Analytics workspace tell the whole story:
   → `The next 5 occurrences of 'cost_anomaly_check' (Cron: '0 0 8 * * *'):
   09/02/2026 08:00:00Z …`
 - **Manual invoke** exercised the full chain: `ManagedIdentityCredential` acquired a
-  token (200) → `POST …/subscriptions/b321…/providers/Microsoft.CostManagement/query`
+  token (200) → `POST …/subscriptions/<SUBSCRIPTION_ID>/providers/Microsoft.CostManagement/query`
   (subscription ID from the new app setting) → `429 Too many requests` (triggered it
   a few times in quick succession — the Cost Management API rate-limits aggressively)
   → caught by the `except AzureError` path → `skipping this run` → `Executed
@@ -318,6 +318,75 @@ Redeployed and verified: `azd provision` landed `MINIMUM_BASELINE_USD=1.0`,
 path (still 429 from the Cost Management API after a session of repeated manual
 triggers — handled cleanly, as designed).
 
+## Security pass — a latent blob-auth bug (backported from Drift Detector) + identifier hygiene
+
+A later review against the pre-flight checklist turned up one real bug and some
+housekeeping.
+
+**The bug: the dedupe-state blob code was authenticating the wrong way.**
+`_state_container` built its `BlobServiceClient` from `DefaultAzureCredential` —
+the Function's managed identity — but that identity holds exactly one role, Cost
+Management Reader on the resource group, which grants nothing on the blob data
+plane. Every read of `last-alert.json` 403s. `_read_last_alert_time` swallows it
+(returns `None`, treated as "no prior alert"), so an ordinary run still looks
+fine — but `_set_last_alert_time` on the anomaly path was *unguarded* and would
+have crashed the run right after emitting the `AnomalyDetected` trace, and the
+cooldown timestamp would never persist, so every subsequent run would re-alert.
+
+It never surfaced here because this subscription's spend never triggered an
+anomaly, so `_set_last_alert_time` never ran and the swallowed read-path 403 went
+unnoticed. **Drift Detector**, forked from this skeleton, hit the identical bug on
+its first real trace (its `_state_container` was copied from here) and fixed it —
+see that project's REVIEW.md, checkpoint 4. This backports the same fix.
+
+Why the earlier reasoning missed it: the Stage-2 note "host storage via account
+key, not identity-based connection" correctly decided the *Functions host*
+connection (`AzureWebJobsStorage`) didn't need data-plane roles — but the
+application's *own* state blob is separate code that was using the identity
+directly, and that distinction got lost.
+
+Fix (matches what the spec always said — exactly one role assignment):
+
+- **`resources.bicep`**: the dedupe blob now uses an account-key **connection
+  string**, `STATE_STORAGE_CONNECTION_STRING`, wired from the same account and key
+  as `AzureWebJobsStorage`. No second role assignment — a `Storage Blob Data`
+  role just to write one timestamp would widen the identity for nothing, and the
+  key is already present in the app settings regardless, so reusing it adds no
+  new secret exposure.
+- **`function_app.py`**: `_state_container` switched to
+  `BlobServiceClient.from_connection_string(...)` and no longer takes the
+  credential. `_set_last_alert_time` on the anomaly path is now guarded — a
+  persist failure logs and continues instead of crashing after the alert has
+  fired. Mirrors the philosophy already in `_read_last_alert_time`.
+
+*Lesson:* control-plane roles (Cost Management Reader) and data-plane roles
+(`Storage Blob Data *`) are separate grant systems — holding one says nothing
+about the other, and "it 403s with a valid token" is almost always this. But the
+fix is not reflexively "add the other role": a credential for that storage
+account was already in the app settings, so the least-privilege move was to reuse
+it and keep RBAC at one assignment, not to grant a second.
+
+**Separately, still to verify against the live subscription:** the cost query
+runs at `/subscriptions/<SUBSCRIPTION_ID>` scope, but Cost Management Reader is
+assigned at resource-group scope, which may not authorize a subscription-scoped
+query. Every manual invoke logged here has hit a `429` throttle before the result
+is observable, so this path has never returned real data. If it `403`s in
+production it is caught by `except AzureError` → "skipping this run" → the anomaly
+check silently never fires. Check the next unthrottled scheduled run (08:00 UTC)
+before treating this as closed.
+
+**Housekeeping (identifier hygiene):**
+
+- `azure-naming-conventions.md` gained a "Documentation placeholders" section —
+  the canonical `<TENANT_ID>` / `<SUBSCRIPTION_ID>` / `<PRINCIPAL_ID>` tokens, a
+  redact-at-capture-time rule for this command log, and the `git grep` pre-commit
+  scan.
+- One partial subscription-ID prefix in this file's command log was replaced with
+  `<SUBSCRIPTION_ID>`. The Cost Management Reader role definition GUID stays as-is
+  — built-in role IDs are identical in every tenant and are not sensitive.
+- `.gitignore` now excludes `docs/superpowers/` (internal planning docs are kept
+  locally, not published).
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -357,6 +426,10 @@ triggers — handled cleanly, as designed).
 | `azd env set MINIMUM_BASELINE_USD 1.0` | Made the trailing-average floor a real tunable instead of a hardcoded constant — the fourth `azd env set` value, alongside threshold / cooldown / budget. |
 | `azd provision --preview --no-prompt` (baseline change) | Confirmed azd accepts the `"${MINIMUM_BASELINE_USD=1.0}"` default syntax in `main.parameters.json` and the template still compiles before applying. |
 | `azd provision` + `azd deploy` (baseline + refactor) | Landed the new app setting, redeployed the refactored function. Verified `MINIMUM_BASELINE_USD=1.0` on the app and `admin/functions` still non-empty. |
+| `git grep -nIE '<guid>\|/subscriptions/<36>\|*.onmicrosoft.com'` (security pass) | Pre-commit identifier scan from `azure-naming-conventions.md`. Only non-placeholder hit was one truncated subscription-ID prefix in this command log — replaced with `<SUBSCRIPTION_ID>`. |
+| `az bicep build --file infra/main.bicep` (security pass) | Re-validated the template after swapping the dedupe blob to `STATE_STORAGE_CONNECTION_STRING` — clean. |
+| `pytest -q` (security pass) | 8 tests still green after the connection-string switch and guarding `_set_last_alert_time`. |
+| `curl -X POST .../admin/functions/cost_anomaly_check` (security pass) | Manual trigger to check the fix. The cost query hit `429` again (Cost Management throttle, hot from the day's repeated triggers) and the run returned before reaching the blob code — so the subscription-scope-vs-RG-scope question and the connection-string blob path both wait on the next unthrottled scheduled run. |
 
 ## AZ-900 / AZ-104 domain mapping
 
@@ -365,7 +438,12 @@ triggers — handled cleanly, as designed).
   reinforcement of the AZ-900 "cost management" domain.
 - **Governance**: scoping the Managed Identity to Cost Management Reader at the
   resource-group level (Stage 2) is a hands-on example of least-privilege RBAC,
-  core to both AZ-900 and AZ-104 governance domains.
+  core to both AZ-900 and AZ-104 governance domains. The security pass added a
+  second lesson — control-plane roles (Cost Management Reader) and data-plane
+  roles (`Storage Blob Data *`) are separate grant systems, so a valid token
+  still 403s on blob calls the role doesn't cover. The least-privilege fix was
+  not a second role but reusing the storage key already present for
+  `AzureWebJobsStorage`, keeping RBAC at one assignment.
 - **Monitoring**: Application Insights with a capped daily ingestion cap and short
   retention, and the Action Group email notification (Stage 2), map to the AZ-900
   monitoring domain and AZ-104's Azure Monitor coverage.

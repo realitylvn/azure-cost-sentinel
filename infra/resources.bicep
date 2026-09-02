@@ -162,8 +162,13 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: minimumBaselineUsd
         }
         {
-          name: 'STATE_STORAGE_ACCOUNT_NAME'
-          value: storage.name
+          // The dedupe-state blob is accessed with this account-key connection
+          // string, NOT the Function's managed identity - the identity holds only
+          // Cost Management Reader on the resource group and has no data-plane role
+          // here, and adding one just to write a timestamp would widen it. Same
+          // account and key as AzureWebJobsStorage above.
+          name: 'STATE_STORAGE_CONNECTION_STRING'
+          value: 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
         }
         {
           name: 'STATE_CONTAINER_NAME'

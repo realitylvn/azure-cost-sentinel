@@ -1,4 +1,10 @@
+# azd environment files - carry the real subscription/tenant IDs
 .azure
+
+# Internal planning docs (brainstorm specs, implementation plans) - kept locally,
+# never published as portfolio content
+docs/superpowers/
+
 __pycache__/
 *.pyc
 .pytest_cache/
