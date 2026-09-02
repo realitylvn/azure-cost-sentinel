@@ -249,9 +249,11 @@ means the anomaly → alert → email path can't be tested by waiting. Split it 
 - **Alert rule (query + scope)** — POSTed a synthetic telemetry item straight to
   the App Insights ingestion endpoint (`.../v2.1/track`, `MessageData`,
   `message: "AnomalyDetected: 999% above 7-day average (SYNTHETIC…)"`). Only needs
-  the instrumentation key, no RBAC. Confirmed it landed in `AppTraces`, then the
-  `scheduledQueryRules` rule (PT1H evaluation) picked it up and fired the Action
-  Group. `autoMitigate: true` cleared it afterward.
+  the instrumentation key, no RBAC. Trace at 04:39 UTC landed in `AppTraces`; the
+  `scheduledQueryRules` rule fired at 04:49 UTC (`Fired:Sev3 … on appi-cost-sentinel-dev`)
+  and the Action Group email arrived. `autoMitigate: true` clears it once the trace
+  ages out of the 1-hour window. Full path — trace → Log Analytics → alert rule →
+  Action Group → inbox — confirmed end to end.
 
 Together that covers the whole chain the Function depends on, without deploying any
 test-only code into `function_app.py`.
