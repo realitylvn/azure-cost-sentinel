@@ -194,8 +194,12 @@ resource anomalyAlertRule 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = 
     enabled: true
     evaluationFrequency: 'PT1H'
     windowSize: 'PT1H'
+    // Scoped to the App Insights resource itself, not the underlying Log Analytics
+    // workspace: only the App Insights scope exposes the classic "traces" table
+    // alias with camelCase columns. Scoping to the raw workspace would require
+    // querying "AppTraces" with PascalCase columns instead.
     scopes: [
-      logAnalytics.id
+      appInsights.id
     ]
     criteria: {
       allOf: [

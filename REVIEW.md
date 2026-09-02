@@ -102,6 +102,28 @@ migration:
   (confirmed by an actual failed build attempt with `tags:` added, not assumed), so
   naming is the only convention signal those two can carry.
 
+## Provision attempt #1 — partial failure, real bug found
+
+`azd provision` ran for real. 7 resources came up clean (resource group, storage
+account, Log Analytics workspace, Application Insights, App Service plan, Function
+App, Action Group), then failed creating the anomaly alert rule:
+
+```
+BadRequest: 'where' operator: Failed to resolve table or column expression named 'traces'.
+```
+
+**Root cause**: the alert's `scopes` pointed at the Log Analytics workspace resource
+directly. For workspace-based Application Insights, the raw workspace stores
+telemetry in `App*`-prefixed tables (`AppTraces`, PascalCase columns) — the friendly
+classic table names (`traces`, camelCase `message`) only resolve when a log alert's
+scope is the **Application Insights resource itself**, not the workspace underneath
+it. This is a real, easy-to-hit distinction between "Application Insights" and "the
+Log Analytics workspace behind it" that AZ-104 tends to gloss over. Fixed by pointing
+`scopes` at `appInsights.id` instead of `logAnalytics.id` — no query rewrite needed.
+Role assignment and Budget hadn't been created yet when the deployment stopped, so
+`azd provision` should pick up cleanly on the next run (idempotent — already-created
+resources are left alone).
+
 ## CLI command log
 
 | Command | What it did / why |
