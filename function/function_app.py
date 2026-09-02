@@ -7,7 +7,6 @@ import azure.functions as func
 from azure.core.exceptions import AzureError
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.costmanagement import CostManagementClient
-from azure.mgmt.resource import SubscriptionClient
 from azure.storage.blob import BlobServiceClient
 
 app = func.FunctionApp()
@@ -17,13 +16,6 @@ STATE_BLOB_NAME = "last-alert.json"
 # Below this trailing-average daily spend, a percentage delta is meaningless noise
 # (a $0.01 -> $0.05 day reads as "400% above average" and tells us nothing real).
 MINIMUM_BASELINE_USD = 1.0
-
-
-def _get_subscription_id(credential) -> str:
-    subscriptions = list(SubscriptionClient(credential).subscriptions.list())
-    if not subscriptions:
-        raise RuntimeError("Managed identity cannot see any subscription")
-    return subscriptions[0].subscription_id
 
 
 def _query_daily_cost(credential, subscription_id: str, days: int = 8):
@@ -86,11 +78,15 @@ def _set_last_alert_time(container, when: datetime) -> None:
 def cost_anomaly_check(timer: func.TimerRequest) -> None:
     threshold_pct = float(os.environ.get("ANOMALY_THRESHOLD_PCT", "20"))
     cooldown_days = int(os.environ.get("ALERT_COOLDOWN_DAYS", "3"))
+    # Wired in by infra/resources.bicep from the azd environment. The managed
+    # identity only holds Cost Management Reader on this one subscription anyway,
+    # so there's nothing to "discover" - pass the ID it operates on as config and
+    # skip pulling the whole ARM resource SDK just to read it back.
+    subscription_id = os.environ["AZURE_SUBSCRIPTION_ID"]
 
     credential = DefaultAzureCredential()
 
     try:
-        subscription_id = _get_subscription_id(credential)
         daily = _query_daily_cost(credential, subscription_id, days=8)
     except AzureError as exc:
         logging.error(f"Cost Management API call failed, skipping this run: {exc}")

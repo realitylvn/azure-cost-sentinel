@@ -126,12 +126,15 @@ resources are left alone).
 
 ## Stage 3 — Function code
 
-- **Subscription ID discovered at runtime, not an app setting**: `resources.bicep`
-  never wired an `AZURE_SUBSCRIPTION_ID` app setting, so the Function calls
-  `SubscriptionClient.subscriptions.list()` with its own managed identity and takes
-  the one subscription it can see (Cost Management Reader only grants visibility
-  into the subscription this RG lives in). Avoids an infra redeploy just to pass
-  through a value the identity can already discover itself.
+- **Subscription ID passed as an app setting, not discovered at runtime**
+  *(revised — see "Deploy #2" below for why the original runtime-discovery
+  approach was dropped)*: `resources.bicep` wires `AZURE_SUBSCRIPTION_ID` into the
+  Function App's settings from `subscription().subscriptionId`. The managed
+  identity only holds Cost Management Reader on this one subscription, so there is
+  nothing to "discover" — and reading it back via `SubscriptionClient` meant
+  pulling the entire `azure-mgmt-resource` SDK for a single string. The original
+  reasoning ("avoid an infra redeploy") didn't hold up: the value was already in
+  the azd environment, and `azd provision` re-runs idempotently anyway.
 - **Sampling disabled in `host.json`**: Application Insights sampling is off
   entirely. The one thing the whole alerting design depends on is the single daily
   `AnomalyDetected` trace actually arriving - adaptive sampling could silently drop
@@ -156,8 +159,43 @@ succeeded" and "the app actually works" are not the same claim, and this is the
 concrete example of why that gap matters enough to verify instead of assume.
 
 Fixed by adding `SCM_DO_BUILD_DURING_DEPLOYMENT: "true"` to `resources.bicep`.
-Not yet re-provisioned/re-deployed - fix is committed, live app is still stale until
-that runs.
+
+## Deploy #2 — build ran, still zero functions: the actual root cause
+
+After `azd provision` (SCM setting applied) and `azd deploy`, Oryx *did* run a
+remote build this time — and `az functionapp function list` was *still* empty.
+Same surface symptom, different cause underneath.
+
+**Root cause**: `function/requirements.txt` pinned nothing. Oryx installs whatever
+is latest at build time, and `azure-mgmt-resource` had moved to **26.0.0**, a
+release that split the mega-package into per-service distributions.
+`SubscriptionClient` no longer lives at `azure.mgmt.resource` — it moved to a
+separate `azure-mgmt-resource-subscriptions` package (`azure.mgmt.resource.subscriptions`).
+So `from azure.mgmt.resource import SubscriptionClient` raised `ImportError` at
+module load. The Python v2 model indexes functions by *importing* `function_app.py`;
+when that import throws, the worker registers zero functions and the host still
+reports `state: Running` with no error surfaced anywhere in `azd`'s output. The
+only way to see it was `curl .../admin/functions` returning `[]` and reproducing
+the import locally in a clean venv.
+
+This is the same "deployed ≠ working" gap as Deploy #1, one layer deeper: Deploy #1
+was "deps never installed," Deploy #2 was "deps installed, but a newer major
+version broke the API." Both are invisible to `azd deploy`'s success message.
+
+**Fixes** (committed together):
+1. `requirements.txt` — every dependency pinned with `==` to the versions actually
+   tested, so a remote build is reproducible and a future SDK major bump can't
+   silently break a deploy.
+2. Dropped `azure-mgmt-resource` entirely. The Function never used resource-
+   management APIs — only `SubscriptionClient`, only to read back an ID it already
+   operates within. Replaced with an `AZURE_SUBSCRIPTION_ID` app setting wired in
+   `resources.bicep` from `subscription().subscriptionId`. Smaller cold start,
+   fewer transitive packages, one less thing that can break on `pip install`.
+3. Verified locally before redeploying: clean venv + pinned `requirements.txt`,
+   `app.get_functions()` returns `['cost_anomaly_check']` — the exact operation
+   the worker indexer performs.
+
+RBAC unchanged — the identity still holds only Cost Management Reader on the RG.
 
 ## CLI command log
 
@@ -182,6 +220,10 @@ that runs.
 | `azd env new cost-sentinel-dev` / `azd env select cost-sentinel-dev` | Replaced the generic `dev` environment name with the portfolio naming convention before anything was provisioned; old `dev` env left in place, not deleted. |
 | `azd env set ...` (x6, repeated on the new environment) | Re-applied all previously-configured values (region, thresholds, budget, email, subscription) onto `cost-sentinel-dev` so nothing was lost in the rename. |
 | `az deployment sub what-if` (rerun after naming/tagging fix) | Confirmed all 12 resources now carry the correct `<type>-cost-sentinel-dev` names and the four portfolio tags, before touching `azd provision`. |
+| `az functionapp function list -g rg-cost-sentinel-dev -n func-...` | The verification step `azd deploy` doesn't do for you. Came back empty twice — "deploy succeeded" but zero functions indexed. This is *the* check that catches a silently-broken Python deploy. |
+| `curl -s -H "x-functions-key: $KEY" .../admin/host/status` and `.../admin/functions` | Went straight to the Functions runtime: host `state: Running`, `admin/functions` → `[]`. Confirmed the host was healthy and the problem was function *indexing*, not the host or the plan. Kudu's `/api/command`, `/api/vfs`, and log stream are all disabled on Linux Consumption, so the runtime admin API was the only window in. |
+| `python -m venv` + `pip install -r requirements.txt` + `app.get_functions()` (local) | Reproduced the worker's indexing step in a clean venv. `ImportError: cannot import name 'SubscriptionClient'` — the root cause, found locally in seconds instead of guessing against the deployed app. |
+| `az bicep build --file infra/main.bicep` (rerun) | Re-validated the template after adding the `AZURE_SUBSCRIPTION_ID` app setting — clean. |
 
 ## AZ-900 / AZ-104 domain mapping
 

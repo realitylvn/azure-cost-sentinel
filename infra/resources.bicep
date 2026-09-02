@@ -139,6 +139,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: appInsights.properties.ConnectionString
         }
         {
+          // The subscription this Function watches spend for. The identity only
+          // holds Cost Management Reader on this one subscription, so there's
+          // nothing to discover at runtime - passing it as config lets the code
+          // drop the azure-mgmt-resource SDK dependency entirely.
+          name: 'AZURE_SUBSCRIPTION_ID'
+          value: subscription().subscriptionId
+        }
+        {
           name: 'ANOMALY_THRESHOLD_PCT'
           value: string(anomalyThresholdPct)
         }

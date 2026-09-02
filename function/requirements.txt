@@ -1,5 +1,8 @@
-azure-functions
-azure-identity
-azure-mgmt-costmanagement
-azure-mgmt-resource
-azure-storage-blob
+# Pinned deliberately. Unpinned, Oryx installs latest on every remote build, and
+# azure-mgmt-resource 26.0.0 split the package (SubscriptionClient moved out) -
+# that broke a deploy silently: the worker failed to import function_app.py, so
+# zero functions indexed while the host still reported "Running".
+azure-functions==1.25.0
+azure-identity==1.25.3
+azure-mgmt-costmanagement==5.0.0
+azure-storage-blob==12.30.1
