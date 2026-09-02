@@ -48,6 +48,32 @@ runs, so the reasoning doesn't get reconstructed from memory after the fact.
   Functions templates. Worth revisiting later if you want to hardcode zero secrets
   anywhere, but it keeps this stage matching the spec as written.
 
+## Platform quirks hit along the way
+
+- **Y1 (Consumption plan) quota is its own family, separate from Compute VM quota.**
+  The first `azd provision --preview` failed preflight with
+  `SubscriptionIsOverQuotaForSku`, even though `az vm list-usage` showed healthy
+  Compute quota (10 vCPUs available) in the same region. That's because the
+  Function App Consumption plan's underlying compute draws from an **App Service**
+  quota family (`Microsoft.Web`), tracked completely separately from `Microsoft.Compute`
+  VM quota — checking one tells you nothing about the other. Brand-new subscriptions
+  commonly start at 0 for this specific quota until requested via Portal → Quotas →
+  provider "App Service" (not "Compute"). This one is genuinely easy to blank on,
+  since most AZ-104 material talks about VM quota and doesn't call out that Functions'
+  Consumption plan is gated by a different bucket entirely.
+- **This particular quota request needs a support engineer**, rather than being
+  auto-approved instantly — submitted for Y1 in East US 2, not zone-redundant, new
+  limit 10. Pick back up here once it clears.
+- **Zone redundancy isn't on the table for this SKU anyway.** Zone redundancy spreads
+  instances across multiple physical datacenters in a region so the app survives one
+  zone going down — a production high-availability feature. The Consumption (Y1)
+  plan doesn't support it at all; it's a Premium-plan-only capability. So "Not Zone
+  Redundant" in the quota request isn't a compromise, it's just accurate to what Y1
+  actually is — and this tool (a single-instance daily cost check against its own
+  subscription) has no availability requirement that would justify Premium anyway:
+  if the Function misses a run during a rare zone outage, nothing breaks, it just
+  checks again on the next schedule.
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -64,6 +90,10 @@ runs, so the reasoning doesn't get reconstructed from memory after the fact.
 | `az bicep install` | Installed the Bicep CLI (not present yet) so `az bicep build` could run. |
 | `az bicep build --file infra/main.bicep` | Compiled the drafted template to check for syntax/type errors before anyone looks at a `what-if` plan — came back clean. |
 | `azd env set AZURE_LOCATION eastus2` | Set the deployment region. Unlike the budget amount, threshold %, and notification email, region is a low-stakes technical default, not a personal/business decision, so set directly rather than asked. |
+| `azd env set ANOMALY_THRESHOLD_PCT 25` / `ALERT_COOLDOWN_DAYS 3` / `BUDGET_AMOUNT_USD 5` / `NOTIFICATION_EMAIL ...` | Set the four values the spec explicitly calls out as personal/business decisions, not defaults to invent. |
+| `azd env set AZURE_SUBSCRIPTION_ID ...` | `azd provision --preview` requires this explicitly even though `az` already had the right subscription selected — azd reads its own environment, not the ambient `az` context. |
+| `azd provision --preview` | The what-if dry run — compiled and validated the template against the real subscription with no changes applied. Failed preflight on `SubscriptionIsOverQuotaForSku` for the Y1 App Service plan (see "Platform quirks" above). Quota increase requested via Portal, pending a support engineer — rerun this once it clears. |
+| `az vm list-usage --location <region>` (several regions) | Checked Compute VM quota to rule out a Compute-side cause — all healthy, confirming the blocker was App Service-specific quota instead. |
 
 ## AZ-900 / AZ-104 domain mapping
 
@@ -76,3 +106,11 @@ runs, so the reasoning doesn't get reconstructed from memory after the fact.
 - **Monitoring**: Application Insights with a capped daily ingestion cap and short
   retention, and the Action Group email notification (Stage 2), map to the AZ-900
   monitoring domain and AZ-104's Azure Monitor coverage.
+- **Service limits & quotas**: hitting `SubscriptionIsOverQuotaForSku` on the Y1 plan,
+  and learning it's a separate App Service quota family from Compute VM quota, is
+  direct, hands-on AZ-104 "manage subscriptions and governance" material — quota is
+  its own topic there, distinct from RBAC/policy.
+- **Availability & scaling**: the zone-redundancy question (Consumption/Y1 doesn't
+  support it, Premium does) is core AZ-104 "implement and manage storage" /
+  availability content — the kind of specific plan-tier capability detail that's easy
+  to get wrong on the exam without having hit it in a real quota form.

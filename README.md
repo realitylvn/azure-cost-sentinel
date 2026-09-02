@@ -20,7 +20,7 @@
 [Diagram — even a simple boxes-and-arrows PNG/SVG exported from draw.io or excalidraw works better than a wall of text. Embed it: `![architecture](docs/architecture.png)`]
 
 **Services used:** [list — Functions, Bicep, Monitor, etc.]
-**Auth:** Managed Identity — no stored secrets, no client credentials in code or config.
+**Auth:** Managed Identity secures all Cost Management API access (the tool's core function) — no credentials in code. The Function host's own runtime storage connection uses a platform-managed key via app settings, azd's standard default, not a manually handled secret.
 
 ## Environment
 
