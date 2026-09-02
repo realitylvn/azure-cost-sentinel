@@ -210,7 +210,7 @@ in the Log Analytics workspace tell the whole story:
   → `The next 5 occurrences of 'cost_anomaly_check' (Cron: '0 0 8 * * *'):
   09/02/2026 08:00:00Z …`
 - **Manual invoke** exercised the full chain: `ManagedIdentityCredential` acquired a
-  token (200) → `POST …/subscriptions/b321…/providers/Microsoft.CostManagement/query`
+  token (200) → `POST …/subscriptions/<SUBSCRIPTION_ID>/providers/Microsoft.CostManagement/query`
   (subscription ID from the new app setting) → `429 Too many requests` (triggered it
   a few times in quick succession — the Cost Management API rate-limits aggressively)
   → caught by the `except AzureError` path → `skipping this run` → `Executed
@@ -318,6 +318,62 @@ Redeployed and verified: `azd provision` landed `MINIMUM_BASELINE_USD=1.0`,
 path (still 429 from the Cost Management API after a session of repeated manual
 triggers — handled cleanly, as designed).
 
+## Security pass — identifier hygiene + a missing data-plane role
+
+A later review against the pre-flight checklist turned up one real bug and some
+housekeeping.
+
+**The bug: the dedupe-state blob code had no permission to run.** `_state_container`
+builds a `BlobServiceClient` with `DefaultAzureCredential` — the Function's managed
+identity — but the only role assignment in `resources.bicep` was Cost Management
+Reader, which grants nothing on the blob data plane. So every read of
+`last-alert.json` was a silent 403 (swallowed by `_read_last_alert_time`, treated
+as "no prior alert") and the write in `_set_last_alert_time` was an *unguarded*
+403 — an anomaly-day run would emit the alert trace, then crash, showing as a
+failed execution in the portal. The cooldown / repeat-suppression feature had
+therefore never actually worked. It went unnoticed because the only end-to-end
+test of the alert path was a synthetic App Insights trace (see "Testing the alert
+path" above), which never exercises the blob code.
+
+Why the earlier reasoning missed it: the Stage-2 note "host storage via account
+key, not identity-based connection" correctly decided the *Functions host*
+connection (`AzureWebJobsStorage`) didn't need data-plane roles — but the
+application's *own* state blob is separate code using the identity directly, and
+that distinction got lost.
+
+Fix:
+
+- **`resources.bicep`**: added a `Storage Blob Data Contributor`
+  (`ba92f5b4-2d11-453d-a403-e96b0029c9fe`) role assignment for the Function's
+  identity, scoped to the single `state` container — not the storage account, not
+  the subscription. Least-privilege: the identity can read/write blobs in that one
+  container and nothing else.
+- **`function_app.py`**: wrapped `_set_last_alert_time` in try/except so a storage
+  failure (including the few minutes of RBAC propagation lag right after a fresh
+  `azd provision`) logs a warning instead of failing a run that has already sent
+  the alert. Mirrors the philosophy already in `_read_last_alert_time`.
+
+**Still to verify against the live subscription:** the cost query runs at
+`/subscriptions/<SUBSCRIPTION_ID>` scope, but Cost Management Reader is assigned at
+resource-group scope, which does not authorize a subscription-scoped query. The
+one manual invoke logged above hit a `429` throttle before any authorization
+check, so this path has never returned real data. If it `403`s in production it is
+caught by `except AzureError` → "skipping this run" → the anomaly check silently
+never fires. Trigger the deployed function once outside a throttle window and
+confirm a `200` on the `/query` call before treating this as closed.
+
+**Housekeeping (identifier hygiene):**
+
+- `azure-naming-conventions.md` gained a "Documentation placeholders" section —
+  the canonical `<TENANT_ID>` / `<SUBSCRIPTION_ID>` / `<PRINCIPAL_ID>` tokens, a
+  redact-at-capture-time rule for this command log, and the `git grep` pre-commit
+  scan.
+- One partial subscription-ID prefix in this file's command log was replaced with
+  `<SUBSCRIPTION_ID>`. The Cost Management Reader role definition GUID stays as-is
+  — built-in role IDs are identical in every tenant and are not sensitive.
+- `.gitignore` now excludes `docs/superpowers/` (internal planning docs are kept
+  locally, not published).
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -357,6 +413,9 @@ triggers — handled cleanly, as designed).
 | `azd env set MINIMUM_BASELINE_USD 1.0` | Made the trailing-average floor a real tunable instead of a hardcoded constant — the fourth `azd env set` value, alongside threshold / cooldown / budget. |
 | `azd provision --preview --no-prompt` (baseline change) | Confirmed azd accepts the `"${MINIMUM_BASELINE_USD=1.0}"` default syntax in `main.parameters.json` and the template still compiles before applying. |
 | `azd provision` + `azd deploy` (baseline + refactor) | Landed the new app setting, redeployed the refactored function. Verified `MINIMUM_BASELINE_USD=1.0` on the app and `admin/functions` still non-empty. |
+| `git grep -nIE '<guid>\|/subscriptions/<36>\|*.onmicrosoft.com'` (security pass) | Pre-commit identifier scan from `azure-naming-conventions.md`. Only non-placeholder hit was one truncated subscription-ID prefix in this command log — replaced with `<SUBSCRIPTION_ID>`. |
+| `az bicep build --file infra/main.bicep` (security pass) | Re-validated the template after adding the `Storage Blob Data Contributor` role assignment — clean. |
+| `pytest -q` (security pass) | 8 tests still green after guarding `_set_last_alert_time`. |
 
 ## AZ-900 / AZ-104 domain mapping
 
@@ -365,7 +424,11 @@ triggers — handled cleanly, as designed).
   reinforcement of the AZ-900 "cost management" domain.
 - **Governance**: scoping the Managed Identity to Cost Management Reader at the
   resource-group level (Stage 2) is a hands-on example of least-privilege RBAC,
-  core to both AZ-900 and AZ-104 governance domains.
+  core to both AZ-900 and AZ-104 governance domains. The security pass added a
+  second lesson — control-plane roles (Cost Management Reader) and data-plane
+  roles (Storage Blob Data Contributor) are separate grant systems; holding one
+  says nothing about the other, and the blob code silently failed until the
+  data-plane role was assigned.
 - **Monitoring**: Application Insights with a capped daily ingestion cap and short
   retention, and the Action Group email notification (Stage 2), map to the AZ-900
   monitoring domain and AZ-104's Azure Monitor coverage.

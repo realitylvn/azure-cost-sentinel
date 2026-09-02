@@ -27,6 +27,9 @@ param budgetStartDate string = utcNow('yyyy-MM-01')
 @description('Built-in "Cost Management Reader" role definition ID (verified via az role definition list).')
 var costManagementReaderRoleId = '72fafb9e-0641-4937-9268-a91bfd8191a3'
 
+@description('Built-in "Storage Blob Data Contributor" role definition ID.')
+var storageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+
 // Only storage accounts and Function Apps need azd's uniqueness token appended -
 // both have globally-unique naming requirements the rest of these resources don't.
 // See azure-naming-conventions.md.
@@ -179,6 +182,20 @@ resource costManagementReaderAssignment 'Microsoft.Authorization/roleAssignments
   scope: resourceGroup()
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', costManagementReaderRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// The Function's dedupe-state blob (last-alert.json) is read and written by the
+// managed identity via DefaultAzureCredential - the Cost Management Reader role
+// above grants nothing on the data plane, so this is the role that read/write
+// actually needs. Scoped to the single 'state' container, not the whole account.
+resource stateBlobAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storage::blobServices::stateContainer.id, functionApp.id, storageBlobDataContributorRoleId)
+  scope: storage::blobServices::stateContainer
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleId)
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
   }

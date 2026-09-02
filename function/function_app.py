@@ -206,4 +206,13 @@ def cost_anomaly_check(timer: func.TimerRequest) -> None:
         logging.warning(
             f"AnomalyDetected: {decision.delta_pct:.0f}% above 7-day average"
         )
-        _set_last_alert_time(container, now)
+        try:
+            _set_last_alert_time(container, now)
+        except Exception as exc:  # noqa: BLE001
+            # The alert trace is already out, so the email will fire. A failed
+            # state write only means the next run can't suppress a repeat - worst
+            # case one duplicate email, which beats failing the run.
+            logging.warning(
+                f"Could not persist dedupe timestamp; repeat-alert suppression "
+                f"may not work until storage access recovers: {exc}"
+            )
