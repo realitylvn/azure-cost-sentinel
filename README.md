@@ -37,6 +37,15 @@ today doesn't match.
 ## Architecture
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {
+  'fontSize':'14px',
+  'primaryColor':'#dce8fa',
+  'primaryTextColor':'#12233d',
+  'primaryBorderColor':'#5b7fbf',
+  'lineColor':'#7d8590',
+  'textColor':'#12233d',
+  'edgeLabelBackground':'#ffffff'
+}}}%%
 flowchart LR
     timer([Timer trigger<br/>08:00 UTC daily]) --> fn[Function App<br/>Python 3.11 · Consumption]
 
@@ -50,6 +59,11 @@ flowchart LR
     ag -->|email| mail([NOTIFICATION_EMAIL])
 
     budget[Budget<br/>80% of monthly cap] -.->|email| mail
+
+    classDef built fill:#c7ddf5,stroke:#3f6fb5,stroke-width:2px,color:#12233d;
+    classDef ext fill:#eef1f5,stroke:#9aa4b2,color:#12233d;
+    class fn,blob built;
+    class timer,cm,ai,law,alert,ag,mail,budget ext;
 ```
 
 **Services used:** Azure Functions (Python, Consumption/Y1 plan) · Bicep · Managed Identity ·
