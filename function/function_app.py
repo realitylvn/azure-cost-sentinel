@@ -106,11 +106,16 @@ def _query_daily_cost(credential, subscription_id: str, days: int = REQUIRED_DAY
     return ordered
 
 
-def _state_container(credential):
-    account = os.environ["STATE_STORAGE_ACCOUNT_NAME"]
+def _state_container():
+    """Container client for the dedupe-state blob, over an account-key connection
+    string - NOT the managed identity. The identity holds only Cost Management
+    Reader on the resource group; it has no data-plane role on this storage
+    account, and granting one just to write a single timestamp would widen it for
+    no reason. STATE_STORAGE_CONNECTION_STRING is wired in resources.bicep from
+    the same account key as AzureWebJobsStorage."""
     container_name = os.environ["STATE_CONTAINER_NAME"]
-    blob_service = BlobServiceClient(
-        account_url=f"https://{account}.blob.core.windows.net", credential=credential
+    blob_service = BlobServiceClient.from_connection_string(
+        os.environ["STATE_STORAGE_CONNECTION_STRING"]
     )
     return blob_service.get_container_client(container_name)
 
@@ -167,7 +172,7 @@ def cost_anomaly_check(timer: func.TimerRequest) -> None:
         return
 
     now = datetime.now(timezone.utc)
-    container = _state_container(credential)
+    container = _state_container()
     last_alert = _read_last_alert_time(container)
 
     decision = evaluate_anomaly(
@@ -206,13 +211,10 @@ def cost_anomaly_check(timer: func.TimerRequest) -> None:
         logging.warning(
             f"AnomalyDetected: {decision.delta_pct:.0f}% above 7-day average"
         )
+        # The alert has already been raised via the trace above. A failure to
+        # persist the cooldown timestamp must not fail the run - worst case is a
+        # duplicate email on the next run, which beats a crash after we've alerted.
         try:
             _set_last_alert_time(container, now)
         except Exception as exc:  # noqa: BLE001
-            # The alert trace is already out, so the email will fire. A failed
-            # state write only means the next run can't suppress a repeat - worst
-            # case one duplicate email, which beats failing the run.
-            logging.warning(
-                f"Could not persist dedupe timestamp; repeat-alert suppression "
-                f"may not work until storage access recovers: {exc}"
-            )
+            logging.warning(f"Could not persist dedupe timestamp: {exc}")
