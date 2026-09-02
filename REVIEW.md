@@ -197,6 +197,41 @@ version broke the API." Both are invisible to `azd deploy`'s success message.
 
 RBAC unchanged — the identity still holds only Cost Management Reader on the RG.
 
+### Verified working (this time for real)
+
+`azd provision` (app setting landed) → `azd deploy` → the Function host's own logs
+in the Log Analytics workspace tell the whole story:
+
+- **Before**: `AppExceptions` at 03:01 / 03:16 / 03:57 —
+  `ImportError: cannot import name 'SubscriptionClient'` → `Worker failed to index
+  functions` → `0 functions loaded`. The platform had been logging the exact root
+  cause the whole time; `azd` just never surfaced it.
+- **After** (04:11): `1 functions loaded` → `Found: Host.Functions.cost_anomaly_check`
+  → `The next 5 occurrences of 'cost_anomaly_check' (Cron: '0 0 8 * * *'):
+  09/02/2026 08:00:00Z …`
+- **Manual invoke** exercised the full chain: `ManagedIdentityCredential` acquired a
+  token (200) → `POST …/subscriptions/b321…/providers/Microsoft.CostManagement/query`
+  (subscription ID from the new app setting) → `429 Too many requests` (triggered it
+  a few times in quick succession — the Cost Management API rate-limits aggressively)
+  → caught by the `except AzureError` path → `skipping this run` → `Executed
+  (Succeeded)`. The 429 handling is the design working, not a bug.
+
+### Two debugging gotchas worth keeping
+
+- **`az functionapp function list` lags.** It reads an ARM cache that can stay empty
+  for many minutes after the runtime has already indexed the function. The
+  authoritative check is the runtime admin API:
+  `curl -H "x-functions-key: <masterKey>" https://<app>.azurewebsites.net/admin/functions`.
+- **`az monitor app-insights query` returned nothing while the data was right
+  there.** For a workspace-based Application Insights, query the Log Analytics
+  workspace directly instead — `az monitor log-analytics query -w <customerId>`,
+  table `AppTraces` / `AppExceptions` (PascalCase columns). That's where the
+  `ImportError` and the whole host startup log actually lived.
+- **Kudu is mostly disabled on Linux Consumption.** `/api/command`, `/api/vfs`,
+  and the log stream all return nothing — there's no persistent SCM container.
+  `/api/deployments` works; everything else has to come from the runtime admin
+  API or Log Analytics.
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -224,6 +259,10 @@ RBAC unchanged — the identity still holds only Cost Management Reader on the R
 | `curl -s -H "x-functions-key: $KEY" .../admin/host/status` and `.../admin/functions` | Went straight to the Functions runtime: host `state: Running`, `admin/functions` → `[]`. Confirmed the host was healthy and the problem was function *indexing*, not the host or the plan. Kudu's `/api/command`, `/api/vfs`, and log stream are all disabled on Linux Consumption, so the runtime admin API was the only window in. |
 | `python -m venv` + `pip install -r requirements.txt` + `app.get_functions()` (local) | Reproduced the worker's indexing step in a clean venv. `ImportError: cannot import name 'SubscriptionClient'` — the root cause, found locally in seconds instead of guessing against the deployed app. |
 | `az bicep build --file infra/main.bicep` (rerun) | Re-validated the template after adding the `AZURE_SUBSCRIPTION_ID` app setting — clean. |
+| `azd provision --no-prompt` (Deploy #2 fix) | Pushed the new `AZURE_SUBSCRIPTION_ID` app setting onto the existing Function App. Idempotent — the other 6 resources reported "Done" with no changes. |
+| `azd deploy --no-prompt` (Deploy #2 fix) | Redeployed the function with pinned `requirements.txt` and the `azure-mgmt-resource` dependency gone. |
+| `curl -H "x-functions-key: <masterKey>" .../admin/functions` (post-fix) | The authoritative "did it actually work" check. Returned the `cost_anomaly_check` entry with its `timerTrigger` binding — non-empty at last. |
+| `az monitor log-analytics query -w <customerId> --analytics-query "AppExceptions \| ..."` | Pulled the Function host's own startup logs straight from the workspace. Showed the pre-fix `ImportError`/`Worker failed to index functions` and the post-fix `1 functions loaded` / `Found: Host.Functions.cost_anomaly_check`. The `az monitor app-insights query` equivalent returned nothing for this workspace-based component — the workspace query is what works. |
 
 ## AZ-900 / AZ-104 domain mapping
 
