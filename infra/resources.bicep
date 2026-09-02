@@ -127,6 +127,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: 'python'
         }
         {
+          // Required for Python on Linux Consumption: without this, a zip deploy
+          // never runs Oryx to pip install requirements.txt, so the worker can't
+          // import the function and reports zero triggers - looks "deployed" but
+          // is silently non-functional. Hit this exact failure on the first deploy.
+          name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
+          value: 'true'
+        }
+        {
           name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
           value: appInsights.properties.ConnectionString
         }

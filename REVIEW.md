@@ -138,6 +138,27 @@ resources are left alone).
   it, and there would be no symptom until an alert quietly failed to fire.
 - Not deployed yet - this is the Stage 3 checkpoint (code written, before `azd deploy`).
 
+## Deploy #1 — looked successful, wasn't
+
+`azd deploy` reported success (33s, endpoint published), but `az functionapp
+function list` came back empty - zero functions registered, even though the app's
+`state` was `Running`. That distinction matters: "the App Service resource is up"
+and "the Functions host successfully indexed your code" are different things, and
+only the second one means anything actually works.
+
+**Root cause**: no `SCM_DO_BUILD_DURING_DEPLOYMENT` app setting. For a Python
+Function App on Linux, a zip deploy without that setting skips Oryx entirely - the
+source lands, but `pip install -r requirements.txt` never runs. The Python worker
+then can't import `azure.mgmt.costmanagement` etc., fails to load the function, and
+reports nothing to index. No error surfaced anywhere in `azd deploy`'s own output;
+the only way to catch it was checking the function list directly afterward - "deploy
+succeeded" and "the app actually works" are not the same claim, and this is the
+concrete example of why that gap matters enough to verify instead of assume.
+
+Fixed by adding `SCM_DO_BUILD_DURING_DEPLOYMENT: "true"` to `resources.bicep`.
+Not yet re-provisioned/re-deployed - fix is committed, live app is still stale until
+that runs.
+
 ## CLI command log
 
 | Command | What it did / why |
