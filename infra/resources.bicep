@@ -48,6 +48,23 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 
   resource blobServices 'blobServices' = {
     name: 'default'
+    properties: {
+      // The only cross-origin consumer is the Ops Command Center dashboard
+      // fetching status.json - a single non-sensitive JSON file already served
+      // anonymously from $web. A wildcard GET origin adds no exposure and saves
+      // re-touching this once the dashboard hostname exists.
+      cors: {
+        corsRules: [
+          {
+            allowedOrigins: ['*']
+            allowedMethods: ['GET']
+            allowedHeaders: ['*']
+            exposedHeaders: ['*']
+            maxAgeInSeconds: 3600
+          }
+        ]
+      }
+    }
 
     resource stateContainer 'containers' = {
       name: stateContainerName

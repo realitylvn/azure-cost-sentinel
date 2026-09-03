@@ -496,6 +496,56 @@ note under Deploy #2 already recorded this for the host startup logs; it applies
 *all* telemetry from this component, function executions included. Every scheduled
 run is present and correct in `AppRequests` once queried the right way.
 
+## Status-contract rollout (2026-09-03)
+
+Part of the portfolio-wide status-contract rollout so the Ops Command Center
+dashboard (project 5) has something to aggregate. Spec:
+`azure-ops-command-center/docs/superpowers/specs/2026-09-03-status-contract-rollout-design.md`;
+contract: `azure-ops-command-center/docs/status-contract.md`. Cost Sentinel only
+*produces* its `status.json`.
+
+- **`build_status_dict` — a pure function**, same split as `evaluate_anomaly`: a
+  `Decision` (or an error-reason string) plus the threshold and a clock value in,
+  the fixed cross-project contract dict out, no I/O. `tests/test_status_contract.py`
+  has one case per outcome — `insufficient_data` / `low_baseline` / `no_anomaly`
+  → `ok`, `suppressed` / `anomaly` → `finding`, the API-error paths → `error`.
+  Every headline is percentages only, asserted with a `no $` check — the
+  Cost Sentinel rule holds in `status.json` too.
+- **`detail`** is `{ delta_pct, threshold_pct, suppressed_by_cooldown,
+  baseline_too_low }`; `delta_pct` is `null` on `insufficient_data` and
+  `low_baseline` where no percentage was computed.
+- **`_publish_status` writes to the storage account's `$web` container** over the
+  **account-key connection string** — the same channel the dedupe blob uses, not
+  the managed identity. The identity holds Cost Management Reader at subscription
+  scope (the scope fix already merged as `01a1d66`, see the section above) and
+  still has no data-plane role on this storage account. Best-effort: a publish
+  failure logs and the run continues.
+- **`cost_anomaly_check` refactored so every exit path publishes.** The
+  `AzureError` and unexpected-exception early returns now emit `status: "error"`
+  before returning, so `generated_at` advances on every run. Given the persistent
+  Cost Management `429` documented above, this endpoint will legitimately read
+  `status: "error"` on throttled runs until the throttle clears — honest and
+  contract-valid, the dashboard renders it as `error`, not stale.
+- **Wildcard `GET` CORS on the blob service** (`infra/resources.bicep`) and a
+  **`$web` static-website postprovision hook** (`scripts/enable-static-website.ps1`)
+  — `$web` serves `status.json` anonymously without `allowBlobPublicAccess`,
+  which stays off across the portfolio.
+- **Local:** `pytest -q` → 19 passing (was 8), `test_function_indexes` unchanged
+  (still one `cost_anomaly_check` / `timerTrigger`). `az bicep build` clean.
+- **Post-merge (Jonathan):** `azd provision` → `azd deploy` → `curl` the `$web`
+  `status.json` URL, record it here. One of the four project-5 gates.
+
+**Live `$web` endpoint:** _to be filled after the post-merge deploy._
+
+### AZ-900 / AZ-104 domains touched
+
+- **Monitoring & observability / cross-service data contract** — a scheduled
+  workload publishing a machine-readable health snapshot to a schema shared
+  across four projects, `schema_version` for forward compatibility; the consumer
+  derives staleness. Static-website (`$web`) anonymous hosting without
+  `allowBlobPublicAccess`, plus blob-service CORS — the data-plane vs
+  control-plane line (why `$web` is an `azd` hook, CORS is Bicep).
+
 ## CLI command log
 
 | Command | What it did / why |
@@ -545,6 +595,10 @@ run is present and correct in `AppRequests` once queried the right way.
 | `az deployment sub create --template-file infra/main.bicep --parameters ...` (scope fix) | Applied the subscription-scoped `Cost Management Reader` assignment. `azd provision` is the normal path; used `az deployment sub create` directly here. `Succeeded`. |
 | `az role assignment list --assignee <PRINCIPAL_ID> --all` | Confirmed both assignments existed post-deploy (old RG scope + new subscription scope), then confirmed only the subscription-scoped one remained after the cleanup below. |
 | `az rest --method delete --uri ".../roleAssignments/<name>?api-version=2022-04-01"` | Removed the old RG-scoped assignment. `az role assignment delete` threw `MissingSubscription` no matter how the target was specified (`--scope`, `--ids`, `--subscription`) — a CLI quirk — so the delete went through the REST API. |
+| `.venv\Scripts\python -m pytest -q` *(status-contract rollout)* | 19 green (was 8) — `test_status_contract.py` covers `build_status_dict` per outcome (percentages-only headlines asserted), `_web_container` / `_publish_status`, and the two `cost_anomaly_check` publish-path cases. |
+| `az bicep build --file infra/main.bicep --stdout` *(status-contract rollout)* | Confirmed the wildcard-GET `cors` block on `blobServices` compiles clean. |
+| `azd provision` + `azd deploy` *(Jonathan, post-merge)* | Applies the CORS change, runs `scripts/enable-static-website.ps1` (postprovision hook) to enable `$web` hosting, then ships the Function change. Verify with `GET /admin/functions` — still just `cost_anomaly_check`. |
+| `curl -s https://<account>.z<NN>.web.core.windows.net/status.json` *(Jonathan, post-deploy)* | Rollout gate — valid `schema_version: 1` JSON matching the contract. Paste the real URL into the "Status-contract rollout" section. |
 
 ## AZ-900 / AZ-104 domain mapping
 
