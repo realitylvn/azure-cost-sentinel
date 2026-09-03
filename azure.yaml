@@ -7,3 +7,10 @@ services:
     project: ./function
     language: python
     host: function
+
+hooks:
+  postprovision:
+    shell: pwsh
+    run: ./scripts/enable-static-website.ps1
+    interactive: false
+    continueOnError: false
