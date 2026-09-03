@@ -120,3 +120,45 @@ def test_publish_status_swallows_a_storage_failure(monkeypatch):
 
     monkeypatch.setattr(function_app, "_web_container", boom)
     function_app._publish_status({"schema_version": 1})
+
+
+def _wire(monkeypatch, published):
+    import function_app as fa
+
+    monkeypatch.setattr(fa, "DefaultAzureCredential", lambda: object())
+    monkeypatch.setattr(fa, "_state_container", lambda: object())
+    monkeypatch.setattr(fa, "_read_last_alert_time", lambda c: None)
+    monkeypatch.setattr(fa, "_set_last_alert_time", lambda c, w: None)
+    monkeypatch.setattr(fa, "_publish_status", lambda d: published.append(d))
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000")
+    return fa
+
+
+def test_cost_check_publishes_on_a_normal_run(monkeypatch):
+    published = []
+    fa = _wire(monkeypatch, published)
+    monkeypatch.setattr(
+        fa, "_query_daily_cost", lambda *a, **k: [(None, 10.0) for _ in range(8)]
+    )
+
+    fa.cost_anomaly_check(None)
+
+    assert len(published) == 1
+    assert published[0]["status"] in {"ok", "finding"}
+
+
+def test_cost_check_publishes_error_when_the_api_fails(monkeypatch):
+    from azure.core.exceptions import HttpResponseError
+
+    published = []
+    fa = _wire(monkeypatch, published)
+
+    def boom(*a, **k):
+        raise HttpResponseError("429")
+
+    monkeypatch.setattr(fa, "_query_daily_cost", boom)
+
+    fa.cost_anomaly_check(None)
+
+    assert len(published) == 1
+    assert published[0]["status"] == "error"

@@ -246,17 +246,29 @@ def cost_anomaly_check(timer: func.TimerRequest) -> None:
     subscription_id = os.environ["AZURE_SUBSCRIPTION_ID"]
 
     credential = DefaultAzureCredential()
+    now = datetime.now(timezone.utc)
 
     try:
         daily = _query_daily_cost(credential, subscription_id, days=REQUIRED_DAYS)
     except AzureError as exc:
         logging.error(f"Cost Management API call failed, skipping this run: {exc}")
+        _publish_status(
+            build_status_dict(
+                None, now, threshold_pct=threshold_pct,
+                error_reason="Cost Management API call failed",
+            )
+        )
         return
     except Exception as exc:  # noqa: BLE001 - any failure here must not crash the app
         logging.error(f"Unexpected error querying cost data, skipping this run: {exc}")
+        _publish_status(
+            build_status_dict(
+                None, now, threshold_pct=threshold_pct,
+                error_reason="Unexpected error querying cost data",
+            )
+        )
         return
 
-    now = datetime.now(timezone.utc)
     container = _state_container()
     last_alert = _read_last_alert_time(container)
 
@@ -296,6 +308,13 @@ def cost_anomaly_check(timer: func.TimerRequest) -> None:
         logging.warning(
             f"AnomalyDetected: {decision.delta_pct:.0f}% above 7-day average"
         )
+
+    # Publish the run's outcome for the Ops Command Center dashboard. Best-effort:
+    # a publish failure never fails the run. Reached on every non-error path so
+    # generated_at always advances; the early returns above publish status: error.
+    _publish_status(build_status_dict(decision, now, threshold_pct=threshold_pct))
+
+    if decision.outcome == "anomaly":
         # The alert has already been raised via the trace above. A failure to
         # persist the cooldown timestamp must not fail the run - worst case is a
         # duplicate email on the next run, which beats a crash after we've alerted.
