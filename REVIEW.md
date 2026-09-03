@@ -535,7 +535,17 @@ contract: `azure-ops-command-center/docs/status-contract.md`. Cost Sentinel only
 - **Post-merge (Jonathan):** `azd provision` → `azd deploy` → `curl` the `$web`
   `status.json` URL, record it here. One of the four project-5 gates.
 
-**Live `$web` endpoint:** _to be filled after the post-merge deploy._
+**Live `$web` endpoint:**
+`https://stcostsentineldevhqwhcg.z20.web.core.windows.net/status.json`
+— verified 2026-09-03 after `azd provision` + `azd deploy` from `main`:
+`HTTP 200`, `content-type: application/json`, `schema_version: 1`. The manual
+`POST /admin/functions/cost_anomaly_check` returned `status: "error"` /
+"Cost Management API call failed" — the persistent `429` throttle described
+above, hit on a manual trigger exactly as expected. This is contract-valid;
+the dashboard renders it as `error`, not stale. The next unthrottled 08:00 UTC
+scheduled run will show real data. The postprovision hook enabled
+static-website hosting and the wildcard `GET` CORS rule landed on the blob
+service.
 
 ### AZ-900 / AZ-104 domains touched
 
