@@ -71,10 +71,15 @@ Cost Management API · Application Insights + Log Analytics · Azure Monitor sch
 alert · Action Group · Consumption Budget
 
 **Auth:** The tool's core access — the Cost Management API — is secured entirely by the
-Function's system-assigned **managed identity**, scoped to **Cost Management Reader on the
-resource group** (not the subscription, not a broader role). No credentials in code, and
-that is the identity's **only** role assignment. Storage is reached with account-key
-connection strings delivered as app settings — the Functions host's own runtime storage
+Function's system-assigned **managed identity**, holding built-in **Cost Management
+Reader** and nothing else. That role is read-only over cost and billing data and grants
+no access to any resource. It is assigned at **subscription scope**, because the daily
+query (`POST /subscriptions/{id}/providers/Microsoft.CostManagement/query`) is
+subscription-wide and an RG-scoped cost role does not authorize it — a mismatch that went
+unnoticed until a scheduled run got past the API's rate limiter and returned
+`401 RBACAccessDenied`; see [`REVIEW.md`](REVIEW.md). No credentials in code, and this is
+the identity's **only** role assignment. Storage is reached with account-key connection
+strings delivered as app settings — the Functions host's own runtime storage
 (`AzureWebJobsStorage`, `azd`'s standard default) and the small dedupe-state blob
 (`STATE_STORAGE_CONNECTION_STRING`, same account and key). Giving the identity storage
 data-plane roles instead would widen it past the single assignment the design calls for,
@@ -108,7 +113,7 @@ figures, so it stays meaningful without disclosing real spend.
 ## Running it yourself
 
 Prerequisites: [`azd`](https://aka.ms/azd), an Azure subscription, and permission to create
-a resource-group-scoped role assignment in it.
+a subscription-scoped role assignment in it (Owner or User Access Administrator).
 
 ```bash
 azd env new cost-sentinel-dev
