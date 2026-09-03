@@ -8,7 +8,7 @@ import azure.functions as func
 from azure.core.exceptions import AzureError
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.costmanagement import CostManagementClient
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, ContentSettings
 
 app = func.FunctionApp()
 
@@ -120,6 +120,39 @@ def _state_container():
     return blob_service.get_container_client(container_name)
 
 
+STATUS_BLOB_NAME = "status.json"
+WEB_CONTAINER_NAME = "$web"
+
+
+def _web_container():
+    """Container client for the public $web blob, over the same account-key
+    connection string the dedupe-state blob uses - NOT the managed identity,
+    which holds only Cost Management Reader (subscription scope) and no
+    data-plane role here. Static-website hosting is enabled out of band by
+    scripts/enable-static-website.ps1 (an azd postprovision hook), so $web
+    serves status.json anonymously without allowBlobPublicAccess."""
+    blob_service = BlobServiceClient.from_connection_string(
+        os.environ["STATE_STORAGE_CONNECTION_STRING"]
+    )
+    return blob_service.get_container_client(WEB_CONTAINER_NAME)
+
+
+def _publish_status(status_dict) -> None:
+    """Best-effort publish of status.json to $web. A failure here must never
+    fail the run - same guard as _set_last_alert_time."""
+    try:
+        _web_container().upload_blob(
+            STATUS_BLOB_NAME,
+            json.dumps(status_dict, indent=2),
+            overwrite=True,
+            content_settings=ContentSettings(
+                content_type="application/json", cache_control="max-age=300"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(f"Could not publish status.json: {exc}")
+
+
 def _get_last_alert_time(container):
     blob = container.get_blob_client(STATE_BLOB_NAME)
     if not blob.exists():
@@ -145,6 +178,58 @@ def _read_last_alert_time(container):
 def _set_last_alert_time(container, when: datetime) -> None:
     blob = container.get_blob_client(STATE_BLOB_NAME)
     blob.upload_blob(json.dumps({"last_alert_utc": when.isoformat()}), overwrite=True)
+
+
+SCHEMA_VERSION = 1
+PROJECT_SLUG = "azure-cost-sentinel"
+REPO_URL = "https://github.com/realitylvn/azure-cost-sentinel"
+
+
+def _cost_status(decision, threshold_pct):
+    """(status, headline, detail) for a completed Decision. Percentages only -
+    no dollar figures in any headline (the Cost Sentinel rule)."""
+    delta = None if decision.delta_pct is None else round(decision.delta_pct, 1)
+    detail = {
+        "delta_pct": delta,
+        "threshold_pct": threshold_pct,
+        "suppressed_by_cooldown": decision.outcome == "suppressed",
+        "baseline_too_low": decision.outcome == "low_baseline",
+    }
+    if decision.outcome == "insufficient_data":
+        return "ok", "Warming up - not enough history yet", detail
+    if decision.outcome == "low_baseline":
+        return "ok", "Baseline too low - percentage check skipped", detail
+    if decision.outcome == "no_anomaly":
+        return "ok", f"No anomaly - {delta:.1f}% vs {threshold_pct}% threshold", detail
+    if decision.outcome == "suppressed":
+        return "finding", f"Anomaly {delta:.0f}% over average - alert in cooldown", detail
+    return "finding", f"Anomaly - {delta:.0f}% above 7-day average", detail
+
+
+def build_status_dict(decision, now, *, threshold_pct, error_reason=None):
+    """Pure: a Decision (or an error_reason string) plus the threshold and a
+    clock value in, the status.json contract dict out. No I/O."""
+    if error_reason is not None:
+        status, headline, detail = "error", error_reason, {
+            "delta_pct": None,
+            "threshold_pct": threshold_pct,
+            "suppressed_by_cooldown": False,
+            "baseline_too_low": False,
+        }
+    else:
+        status, headline, detail = _cost_status(decision, threshold_pct)
+    ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "project": PROJECT_SLUG,
+        "cadence": "scheduled-daily",
+        "generated_at": ts,
+        "last_run_at": ts,
+        "status": status,
+        "headline": headline,
+        "detail": detail,
+        "repo_url": REPO_URL,
+    }
 
 
 @app.timer_trigger(schedule="0 0 8 * * *", arg_name="timer", run_on_startup=False)
