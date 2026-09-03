@@ -375,6 +375,8 @@ production it is caught by `except AzureError` → "skipping this run" → the a
 check silently never fires. Check the next unthrottled scheduled run (08:00 UTC)
 before treating this as closed.
 
+> **Resolved 2026-09-03 — it was broken. See "Cost-query scope" below.**
+
 **Housekeeping (identifier hygiene):**
 
 - `azure-naming-conventions.md` gained a "Documentation placeholders" section —
@@ -393,6 +395,106 @@ delivery re-confirmed live 2026-09-02 23:46 UTC (`test-notifications` →
 `Status: Succeeded`, email received). The cost-query-scope question above is the
 one remaining check — unchanged from when the project was first marked done, and
 gated on an unthrottled scheduled run.
+
+## Cost-query scope: the RG-scoped role returned 401, moved to subscription
+
+The open item above — "does the subscription-scoped cost query work with an
+RG-scoped role?" — sat unresolved because every manual invoke hit the Cost
+Management API's `429` throttle before the call reached authorization. On
+2026-09-03 the Log Analytics workspace was read directly (`AppTraces` /
+`AppRequests`, not `az monitor app-insights query` — see the gotcha below), which
+surfaced every run the Function has ever made:
+
+| Run | Trigger | Cost query result |
+|---|---|---|
+| 2026-09-02 04:11 | manual (build) | `429` |
+| 2026-09-02 05:05 | manual | `429` |
+| **2026-09-02 08:00** | **scheduled** | **`401 RBACAccessDenied`** |
+| 2026-09-02 23:07 | manual (security pass) | `429` |
+| 2026-09-02 23:39 | manual (security pass) | `429` |
+| 2026-09-03 08:00 | scheduled | `429` |
+| 2026-09-03 09:19 | manual (this investigation) | `429` |
+
+The 2026-09-02 08:00 scheduled run is the only call that ever got past the
+throttle, and it answered the question:
+
+```
+Response status: 401   ('WWW-Authenticate': 'Bearer')
+Cost Management API call failed, skipping this run:
+  (RBACAccessDenied) The client does not have authorization to perform action.
+  Code: RBACAccessDenied
+```
+
+**An RG-scoped `Cost Management Reader` does not authorize
+`POST /subscriptions/{id}/providers/Microsoft.CostManagement/query`.** The role
+was scoped to the resource group in the first place on a least-privilege instinct
+(see the Stage-2 note above and the earlier README text), but the tool's entire
+job is a *subscription-wide* cost query — there is no resource-group-scoped form
+of that call. Cost Management returns `401` for this, not the `403` you'd expect;
+the `except AzureError` handler catches it either way and takes the "skipping this
+run" path, so the tool had been silently doing nothing on every run since deploy —
+never once evaluating an anomaly in production.
+
+Same failure *shape* as the dedupe-blob bug (scope narrower than the operation
+needs, `except AzureError` swallows the error, "skip this run" hides it), but a
+separate instance — not shared scaffold code. Drift Detector doesn't have it: its
+`Reader` assignment is scoped to the reference resource group and its
+`get_properties` calls target resources *in that same group*, so role scope and
+call scope match by construction.
+
+**Fix:** the role assignment moved from `resources.bicep` (resource-group scope)
+to a new `infra/subscription-rbac.bicep` module invoked from the
+subscription-scoped `main.bicep`, assigning `Cost Management Reader` at
+`/subscriptions/{id}`. It is its own module because a `roleAssignment`'s `guid()`
+name must resolve at the start of the deployment — it can be built from a module
+*parameter* (the principal id, passed in) but not from another module's *output*.
+
+This stays the identity's **only** role assignment. `Cost Management Reader` is
+read-only over cost and billing data and grants nothing on any resource in the
+subscription, so widening the scope moved the blast radius from "a cost report for
+one resource group" to "a cost report for the subscription" — not resource access.
+Creating a subscription-scoped assignment needs Owner or User Access Administrator
+on the subscription (the deploying account has Owner).
+
+The old RG-scoped assignment was deleted by hand after the new one was confirmed
+(`az deployment sub create` doesn't remove resources dropped from the template).
+`az role assignment delete` threw `MissingSubscription` regardless of
+`--scope` / `--subscription` / `--ids` — a known CLI quirk — so the delete went
+through `az rest --method delete` against the assignment's resource ID.
+
+### The `429` is a persistent throttle, not manual-trigger heat
+
+The earlier security-pass note guessed the `429`s came from "triggering it a few
+times in quick succession." That was wrong. A single cold manual invoke `429`s,
+and so does a direct `az rest` cost query run as the user's own Owner account
+seconds later. The raw `429` headers show why:
+
+```
+x-ms-ratelimit-remaining-microsoft.costmanagement-clienttype-requests: DefaultQuota:0
+x-ms-ratelimit-microsoft.costmanagement-clienttype-retry-after: 10   (rose to 25 on retry)
+x-ms-ratelimit-microsoft.costmanagement-qpu-remaining: QueriesPerHour:595, QueriesPerMin:57
+```
+
+The QPU budget is healthy; the binding limit is a per-*client-type* burst bucket
+pinned at `0`, with a `retry-after` that increases when you retry into it. Cost
+Management throttles this aggressively on low-tier subscriptions. The Function's
+`except AzureError` → "skipping this run" already handles it correctly — a run
+that can't get cost data does nothing and waits for the next schedule — but it
+does mean a real result is only observable on a scheduled run that happens to land
+when the bucket has refilled. The RBAC fix is deployed; confirming a `200` from
+the query depends on catching such a window.
+
+### Gotcha: `az monitor app-insights query` is blind to this component
+
+`az monitor app-insights query --app <appId>` returned **nothing** for scheduled
+runs — no traces, no requests — which briefly looked like telemetry was being lost
+on Consumption cold-starts. It wasn't. For this workspace-based Application
+Insights the data is only queryable through the Log Analytics workspace directly
+(`az monitor log-analytics query -w <customerId>`, tables `AppTraces` /
+`AppRequests` / `AppExceptions`, PascalCase columns). The "Two debugging gotchas"
+note under Deploy #2 already recorded this for the host startup logs; it applies to
+*all* telemetry from this component, function executions included. Every scheduled
+run is present and correct in `AppRequests` once queried the right way.
 
 ## CLI command log
 
@@ -437,20 +539,34 @@ gated on an unthrottled scheduled run.
 | `az bicep build --file infra/main.bicep` (security pass) | Re-validated the template after swapping the dedupe blob to `STATE_STORAGE_CONNECTION_STRING` — clean. |
 | `pytest -q` (security pass) | 8 tests still green after the connection-string switch and guarding `_set_last_alert_time`. |
 | `curl -X POST .../admin/functions/cost_anomaly_check` (security pass) | Manual trigger to check the fix. The cost query hit `429` again (Cost Management throttle, hot from the day's repeated triggers) and the run returned before reaching the blob code — so the subscription-scope-vs-RG-scope question and the connection-string blob path both wait on the next unthrottled scheduled run. |
+| `az monitor log-analytics query -w <customerId> --analytics-query "AppRequests \| ..."` (scope investigation) | Read every Function run straight from the workspace. Showed the 2026-09-02 08:00 scheduled run returning `401 RBACAccessDenied` from the Cost Management query — the RG-scoped role does not authorize the subscription-scoped call. The `az monitor app-insights query` equivalent returned nothing, as with the host logs under Deploy #2. |
+| `curl -sD - -X POST .../Microsoft.CostManagement/query` with a bearer token (scope investigation) | Pulled the raw `429` response headers. `clienttype-requests: DefaultQuota:0`, `retry-after: 10`→`25`, QPU budget healthy — the throttle is a per-client-type burst bucket, not manual-trigger heat and not quota exhaustion. |
+| `az bicep build --file infra/main.bicep --stdout` (scope fix) | Re-validated after moving the role assignment into `infra/subscription-rbac.bicep`. Clean. |
+| `az deployment sub create --template-file infra/main.bicep --parameters ...` (scope fix) | Applied the subscription-scoped `Cost Management Reader` assignment. `azd provision` is the normal path; used `az deployment sub create` directly here. `Succeeded`. |
+| `az role assignment list --assignee <PRINCIPAL_ID> --all` | Confirmed both assignments existed post-deploy (old RG scope + new subscription scope), then confirmed only the subscription-scoped one remained after the cleanup below. |
+| `az rest --method delete --uri ".../roleAssignments/<name>?api-version=2022-04-01"` | Removed the old RG-scoped assignment. `az role assignment delete` threw `MissingSubscription` no matter how the target was specified (`--scope`, `--ids`, `--subscription`) — a CLI quirk — so the delete went through the REST API. |
 
 ## AZ-900 / AZ-104 domain mapping
 
 - **Cost management & billing**: the entire Function is built around the Cost
   Management API and the concept of a Budget + cost alert (Stage 2) — direct
   reinforcement of the AZ-900 "cost management" domain.
-- **Governance**: scoping the Managed Identity to Cost Management Reader at the
-  resource-group level (Stage 2) is a hands-on example of least-privilege RBAC,
-  core to both AZ-900 and AZ-104 governance domains. The security pass added a
-  second lesson — control-plane roles (Cost Management Reader) and data-plane
-  roles (`Storage Blob Data *`) are separate grant systems, so a valid token
-  still 403s on blob calls the role doesn't cover. The least-privilege fix was
-  not a second role but reusing the storage key already present for
-  `AzureWebJobsStorage`, keeping RBAC at one assignment.
+- **Governance**: scoping the Managed Identity to a single `Cost Management Reader`
+  assignment (Stage 2) is a hands-on example of least-privilege RBAC, core to both
+  AZ-900 and AZ-104 governance domains. Two follow-on lessons:
+  - *Control plane vs data plane* (security pass): `Cost Management Reader` and
+    `Storage Blob Data *` are separate grant systems, so a valid token still 403s
+    on blob calls the role doesn't cover. The fix was not a second role but
+    reusing the storage key already in the app settings, keeping RBAC at one
+    assignment.
+  - *Role scope must match call scope* (2026-09-03): the same assignment was
+    scoped to the resource group, but the tool's cost query runs at
+    `/subscriptions/{id}`. An RG-scoped cost role does not authorize a
+    subscription-scoped query — Cost Management returns `401 RBACAccessDenied` —
+    and the `except AzureError` handler hid it as "skipping this run" for the
+    life of the project. Moved to subscription scope (still one assignment,
+    still read-only over cost data only). Least privilege is the *narrowest scope
+    that authorizes the operation*, not reflexively the smallest scope available.
 - **Monitoring**: Application Insights with a capped daily ingestion cap and short
   retention, and the Action Group email notification (Stage 2), map to the AZ-900
   monitoring domain and AZ-104's Azure Monitor coverage.

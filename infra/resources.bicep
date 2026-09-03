@@ -24,9 +24,6 @@ param notificationEmail string
 @description('First-of-month start date for the budget, in yyyy-MM-dd form.')
 param budgetStartDate string = utcNow('yyyy-MM-01')
 
-@description('Built-in "Cost Management Reader" role definition ID (verified via az role definition list).')
-var costManagementReaderRoleId = '72fafb9e-0641-4937-9268-a91bfd8191a3'
-
 // Only storage accounts and Function Apps need azd's uniqueness token appended -
 // both have globally-unique naming requirements the rest of these resources don't.
 // See azure-naming-conventions.md.
@@ -164,9 +161,9 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           // The dedupe-state blob is accessed with this account-key connection
           // string, NOT the Function's managed identity - the identity holds only
-          // Cost Management Reader on the resource group and has no data-plane role
-          // here, and adding one just to write a timestamp would widen it. Same
-          // account and key as AzureWebJobsStorage above.
+          // Cost Management Reader (subscription scope, for the cost query) and has
+          // no data-plane role here, and adding one just to write a timestamp would
+          // widen it. Same account and key as AzureWebJobsStorage above.
           name: 'STATE_STORAGE_CONNECTION_STRING'
           value: 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
         }
@@ -179,15 +176,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   }
 }
 
-resource costManagementReaderAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(resourceGroup().id, functionApp.id, costManagementReaderRoleId)
-  scope: resourceGroup()
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', costManagementReaderRoleId)
-    principalId: functionApp.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+// The Cost Management Reader role assignment lives in main.bicep, at SUBSCRIPTION
+// scope. It was originally scoped here to the resource group on a least-privilege
+// instinct, but the tool's whole job is a subscription-wide cost query
+// (POST /subscriptions/{id}/providers/Microsoft.CostManagement/query), and an
+// RG-scoped cost role does not authorize that call - it returns 401 RBACAccessDenied.
+// Confirmed on the 2026-09-02 08:00 UTC scheduled run, the one that got past the
+// Cost Management API's aggressive 429 throttle. See REVIEW.md, "Cost-query scope".
+// functionAppPrincipalId is surfaced as an output for main.bicep to consume.
 
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   name: 'ag-${environmentName}'
@@ -281,3 +277,4 @@ resource budget 'Microsoft.Consumption/budgets@2023-11-01' = {
 
 output functionAppName string = functionApp.name
 output storageAccountName string = storage.name
+output functionAppPrincipalId string = functionApp.identity.principalId

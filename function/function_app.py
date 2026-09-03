@@ -109,10 +109,10 @@ def _query_daily_cost(credential, subscription_id: str, days: int = REQUIRED_DAY
 def _state_container():
     """Container client for the dedupe-state blob, over an account-key connection
     string - NOT the managed identity. The identity holds only Cost Management
-    Reader on the resource group; it has no data-plane role on this storage
-    account, and granting one just to write a single timestamp would widen it for
-    no reason. STATE_STORAGE_CONNECTION_STRING is wired in resources.bicep from
-    the same account key as AzureWebJobsStorage."""
+    Reader (subscription scope, for the daily cost query); it has no data-plane
+    role on this storage account, and granting one just to write a single
+    timestamp would widen it for no reason. STATE_STORAGE_CONNECTION_STRING is
+    wired in resources.bicep from the same account key as AzureWebJobsStorage."""
     container_name = os.environ["STATE_CONTAINER_NAME"]
     blob_service = BlobServiceClient.from_connection_string(
         os.environ["STATE_STORAGE_CONNECTION_STRING"]

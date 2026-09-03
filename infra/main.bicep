@@ -37,6 +37,9 @@ var tags = {
   environment: environmentTag
 }
 
+@description('Built-in "Cost Management Reader" role definition ID (verified via az role definition list --name "Cost Management Reader").')
+var costManagementReaderRoleId = '72fafb9e-0641-4937-9268-a91bfd8191a3'
+
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: 'rg-${environmentName}'
   location: location
@@ -55,6 +58,25 @@ module resources 'resources.bicep' = {
     minimumBaselineUsd: minimumBaselineUsd
     budgetAmountUsd: budgetAmountUsd
     notificationEmail: notificationEmail
+  }
+}
+
+// Cost Management Reader for the Function's managed identity, at SUBSCRIPTION scope.
+// The tool queries subscription-wide spend
+// (POST /subscriptions/{id}/providers/Microsoft.CostManagement/query); an RG-scoped
+// cost role does not authorize that call and Cost Management returns 401
+// RBACAccessDenied (not 403). This is still the identity's only role assignment and
+// it is read-only for cost data - it grants no access to any resource in the
+// subscription. Its own module because a roleAssignment's guid() name must be
+// computable at deployment start - it can take a module PARAMETER (principal id
+// passed in below) but not another module's OUTPUT. Creating a subscription-scoped
+// assignment requires the deployer to hold Owner or User Access Administrator on the
+// subscription. See REVIEW.md, "Cost-query scope: RG-scoped role returned 401".
+module subscriptionRbac 'subscription-rbac.bicep' = {
+  name: 'subscription-rbac'
+  params: {
+    functionAppPrincipalId: resources.outputs.functionAppPrincipalId
+    costManagementReaderRoleId: costManagementReaderRoleId
   }
 }
 
