@@ -541,9 +541,14 @@ contract: `azure-ops-command-center/docs/status-contract.md`. Cost Sentinel only
 `HTTP 200`, `content-type: application/json`, `schema_version: 1`. The manual
 `POST /admin/functions/cost_anomaly_check` returned `status: "error"` /
 "Cost Management API call failed" — the persistent `429` throttle described
-above, hit on a manual trigger exactly as expected. This is contract-valid;
-the dashboard renders it as `error`, not stale. The next unthrottled 08:00 UTC
-scheduled run will show real data. The postprovision hook enabled
+above, hit on a manual trigger exactly as expected. This was believed to be
+contract-valid and waiting on an unthrottled scheduled run to clear on its
+own. **It wasn't going to clear on its own — see "Cost Management
+`clienttype` throttle" below, resolved 2026-09-04.** The throttle was never
+about timing; it was a missing `ClientType` header pooling every call into
+Azure's shared, permanently-oversubscribed default rate-limit bucket. Fixed,
+deployed, and confirmed: the endpoint now returns `status: "ok"` on demand,
+not just on a lucky scheduled window. The postprovision hook enabled
 static-website hosting and the wildcard `GET` CORS rule landed on the blob
 service.
 
@@ -617,6 +622,11 @@ service.
 | Same `curl` call, `ClientType: azure-cost-sentinel` header added, nothing else changed | `HTTP 200` — real data back immediately, first attempt, no wait. All `clienttype` rate-limit headers absent from the response entirely. Single-variable test, hypothesis confirmed. |
 | `.venv\Scripts\python -c "..."` — real `_query_daily_cost()` via `DefaultAzureCredential`, live subscription | After adding `headers={"ClientType": "azure-cost-sentinel"}` to the SDK call: 8 real daily cost rows returned, ~$0.01–$0.19/day — matches the number this file has estimated since Stage 4. First time this function has ever returned real data outside a synthetic test. |
 | `.venv\Scripts\python -m pytest -q` (clienttype fix) | 19 green, unchanged — `_query_daily_cost` has never had direct unit coverage (I/O stays out of the pure-function tests by design; `test_status_contract.py` monkeypatches it), so the header addition touches nothing under test. |
+| `git checkout -b fix/cost-management-clienttype-throttle` / commit / `git checkout main` / `git merge --no-ff` / `git push origin main` | Same branch-then-merge pattern as the earlier RBAC scope fix. `git grep` identifier scan run on the changed files first — clean (only the pre-existing, non-sensitive built-in role GUID matched). |
+| `azd deploy --no-prompt` | 33s, function code only — no Bicep changed, so no `azd provision` needed. `SUCCESS`. |
+| `curl -H "x-functions-key: ..." .../admin/functions` (post-deploy) | The Deploy #1/#2 lesson applied: verify indexing, don't trust "deploy succeeded" alone. `cost_anomaly_check` present with its `timerTrigger` binding. |
+| `curl -X POST -H "x-functions-key: ..." -H "Content-Type: application/json" .../admin/functions/cost_anomaly_check -d '{"input": ""}'` | First attempt 415'd (my curl call was missing `Content-Type`, not a Function bug) — retried correctly, `202`. |
+| `curl -s https://.../status.json` (post-trigger) | `status: "ok"`, `generated_at` fresh, `headline: "Baseline too low - percentage check skipped"` — the first error-free run in this project's history. |
 
 ## Cost Management `clienttype` throttle — the real root cause (2026-09-04)
 
@@ -663,14 +673,20 @@ retry/backoff. The Cost Management API's own documentation names the
 "identify yourself to the API you're calling" is a smaller, more specific
 lesson than "add resilience," and it's the one that actually applied here.
 
-**Status at commit time:** fixed and verified locally — the real
-`_query_daily_cost()` function, called live against the actual subscription
-via `DefaultAzureCredential`, returned real daily cost data (see command
-log). Not yet deployed. `azd deploy` (function code only — no `azd
-provision` needed, no Bicep changed) is the next step; once it ships, the
-live `$web` `status.json` endpoint should report real data instead of the
-permanent `status: "error"` this project has shown since it was first
-published. Update this note with the post-deploy result once confirmed.
+**Confirmed working, live, post-deploy (2026-09-04):** `azd deploy` shipped
+the fix (33s, function code only, no `azd provision` needed). `GET
+/admin/functions` showed `cost_anomaly_check` indexed correctly (the
+Deploy #1/#2 lesson from Stage 3 — verify indexing, don't trust "deploy
+succeeded" alone — applied here too). A manual trigger (`POST
+/admin/functions/cost_anomaly_check`) produced the **first error-free run
+in this project's history**: the live `$web` `status.json` now reads
+`status: "ok"`, `headline: "Baseline too low - percentage check skipped"`,
+`generated_at` fresh. That's the anomaly logic working *correctly*, not
+failing again — real spend (~$0.02-$0.19/day) is well under the $1.00
+`MINIMUM_BASELINE_USD` floor, so the percentage check is designed to skip
+rather than fire noise on pennies. The Cost Management API call itself
+succeeded end to end for the first time ever, on the first attempt, no
+retry needed.
 
 ## AZ-900 / AZ-104 domain mapping
 
@@ -699,7 +715,13 @@ published. Update this note with the post-deploy result once confirmed.
 - **Service limits & quotas**: hitting `SubscriptionIsOverQuotaForSku` on the Y1 plan,
   and learning it's a separate App Service quota family from Compute VM quota, is
   direct, hands-on AZ-104 "manage subscriptions and governance" material — quota is
-  its own topic there, distinct from RBAC/policy.
+  its own topic there, distinct from RBAC/policy. A second, subtler lesson from
+  the `clienttype` throttle: not every rate limit is scoped to *your*
+  subscription or tenant. Cost Management pools unidentified callers into one
+  shared, platform-wide bucket — healthy per-subscription quota (entity,
+  tenant, subscription-resource all fine) told a different story than the one
+  dimension actually blocking the call. Reading *all* the rate-limit headers a
+  429 returns, not just the status code, is what surfaced that.
 - **Availability & scaling**: the zone-redundancy question (Consumption/Y1 doesn't
   support it, Premium does) is core AZ-104 "implement and manage storage" /
   availability content — the kind of specific plan-tier capability detail that's easy
