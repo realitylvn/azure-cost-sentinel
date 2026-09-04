@@ -80,6 +80,13 @@ def _query_daily_cost(credential, subscription_id: str, days: int = REQUIRED_DAY
     end = today - timedelta(days=1)
     start = end - timedelta(days=days - 1)
 
+    # Cost Management rate-limits per ClientType, and a caller that omits this
+    # header shares one global "default" bucket with every other Azure customer
+    # who also omits it - permanently oversubscribed, unrelated to this
+    # subscription's own usage. Setting any ClientType value moves the request
+    # to its own dedicated quota (2000 req/min). See REVIEW.md, "Cost Management
+    # clienttype throttle" - confirmed live: identical query 429s without this
+    # header, 200s immediately with it, no other change.
     result = client.query.usage(
         f"/subscriptions/{subscription_id}",
         {
@@ -91,6 +98,7 @@ def _query_daily_cost(credential, subscription_id: str, days: int = REQUIRED_DAY
                 "aggregation": {"totalCost": {"name": "Cost", "function": "Sum"}},
             },
         },
+        headers={"ClientType": "azure-cost-sentinel"},
     )
 
     columns = [c.name for c in result.columns]
