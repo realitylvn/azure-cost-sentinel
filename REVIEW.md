@@ -609,6 +609,68 @@ service.
 | `az bicep build --file infra/main.bicep --stdout` *(status-contract rollout)* | Confirmed the wildcard-GET `cors` block on `blobServices` compiles clean. |
 | `azd provision` + `azd deploy` *(Jonathan, post-merge)* | Applies the CORS change, runs `scripts/enable-static-website.ps1` (postprovision hook) to enable `$web` hosting, then ships the Function change. Verify with `GET /admin/functions` — still just `cost_anomaly_check`. |
 | `curl -s https://<account>.z<NN>.web.core.windows.net/status.json` *(Jonathan, post-deploy)* | Rollout gate — valid `schema_version: 1` JSON matching the contract. Paste the real URL into the "Status-contract rollout" section. |
+| `az rest --method post --url .../Microsoft.CostManagement/query?api-version=2023-11-01` (clienttype investigation) | Reproduced the exact query the Function makes, as the deploying user's own Owner account, freshly — `429` on the first cold call, no prior activity this session. Ruled out "manual-trigger heat" as the cause a second time (first ruled out 2026-09-02, see above). |
+| `curl -sD - ... Microsoft.CostManagement/query` with a bearer token (clienttype investigation) | Pulled raw rate-limit headers on the same call. `costmanagement-entity-requests: DefaultQuota:2`, `costmanagement-tenant-requests: DefaultQuota:18`, `subscription-resource-requests: 1099` — all healthy. Only `costmanagement-clienttype-requests: DefaultQuota:0`. |
+| Same call, retried after waiting the full `retry-after` window (25s) | Still `429`. `retry-after` *rose* (22s → 37s) despite a real wait and zero rapid retries — a penalty-style state, not a simple refilling token bucket. Ruled out "just wait and retry" as a viable fix on its own. |
+| `az rest --method get .../subscriptions/<SUBSCRIPTION_ID>?api-version=2022-12-01` | Confirmed subscription offer: `quotaId: PayAsYouGo_2014-09-01` — a standard non-Enterprise-Agreement subscription, the profile most exposed to this class of throttling per community reports. |
+| `WebSearch` — Microsoft Q&A / GitHub issues on Cost Management API 429s | Found the actual mechanism: a caller that omits the `ClientType` request header shares one global "default" rate-limit bucket with every Azure customer worldwide who also omits it. Setting any `ClientType` value moves the request to its own dedicated bucket (2000 req/min per Microsoft's own documentation). |
+| Same `curl` call, `ClientType: azure-cost-sentinel` header added, nothing else changed | `HTTP 200` — real data back immediately, first attempt, no wait. All `clienttype` rate-limit headers absent from the response entirely. Single-variable test, hypothesis confirmed. |
+| `.venv\Scripts\python -c "..."` — real `_query_daily_cost()` via `DefaultAzureCredential`, live subscription | After adding `headers={"ClientType": "azure-cost-sentinel"}` to the SDK call: 8 real daily cost rows returned, ~$0.01–$0.19/day — matches the number this file has estimated since Stage 4. First time this function has ever returned real data outside a synthetic test. |
+| `.venv\Scripts\python -m pytest -q` (clienttype fix) | 19 green, unchanged — `_query_daily_cost` has never had direct unit coverage (I/O stays out of the pure-function tests by design; `test_status_contract.py` monkeypatches it), so the header addition touches nothing under test. |
+
+## Cost Management `clienttype` throttle — the real root cause (2026-09-04)
+
+The open item from "Cost-query scope" above — every scheduled and manual run
+hitting `429`, `data never seen once` — sat as "a persistent throttle, not
+manual-trigger heat" without a deeper explanation. It has one: **the
+`_query_daily_cost` call never set a `ClientType` request header, and Cost
+Management pools every caller that omits it into one shared "default"
+rate-limit bucket across the entire Azure customer base.** That bucket has
+nothing to do with this subscription, this Function, or this project's own
+call volume — it's permanently oversubscribed by unrelated traffic
+worldwide. The entity/tenant/subscription-resource quotas (scoped to *this*
+subscription) were healthy in every single 429 response ever captured; only
+the shared `clienttype` bucket was ever exhausted.
+
+This explains a detail the earlier "persistent throttle" write-up couldn't:
+why a `retry-after` of 10–37 seconds never actually cleared even on a
+patient, isolated retry. It isn't a token bucket refilling on a timer for
+*this* caller — it's a shared, effectively-always-full pool being drained by
+every other unlabeled caller on the platform, all the time. No amount of
+backoff tuning on our side would have fixed that; the earlier plan to
+mitigate via retry/backoff or reduced cadence would have shipped a
+workaround for the wrong problem.
+
+**Root cause, confirmed via a single-variable live test:** the exact query
+this Function makes, run twice with nothing changed but the presence of one
+header. Without `ClientType`: `429`. With `ClientType: azure-cost-sentinel`:
+`200`, real data, first attempt, no wait — and the `clienttype` rate-limit
+headers vanish from the response entirely, because the request now has its
+own dedicated 2000-req/min bucket instead of the shared one.
+
+**Fix:** one line — `client.query.usage(..., headers={"ClientType":
+"azure-cost-sentinel"})`. No infra change, no RBAC change, no new
+dependency. The `azure-mgmt-costmanagement` SDK's generated `usage()`
+operation already accepts a `headers=` kwarg (confirmed by reading the
+installed SDK's operation implementation — standard `azure-core`
+passthrough), so this needed no workaround beyond calling the client
+correctly.
+
+*Lesson:* a `429` with healthy-looking quota on every visible dimension is a
+sign to look for a dimension you can't see yet, not a sign to reach for
+retry/backoff. The Cost Management API's own documentation names the
+`ClientType` header as the fix for exactly this shared-bucket problem;
+"identify yourself to the API you're calling" is a smaller, more specific
+lesson than "add resilience," and it's the one that actually applied here.
+
+**Status at commit time:** fixed and verified locally — the real
+`_query_daily_cost()` function, called live against the actual subscription
+via `DefaultAzureCredential`, returned real daily cost data (see command
+log). Not yet deployed. `azd deploy` (function code only — no `azd
+provision` needed, no Bicep changed) is the next step; once it ships, the
+live `$web` `status.json` endpoint should report real data instead of the
+permanent `status: "error"` this project has shown since it was first
+published. Update this note with the post-deploy result once confirmed.
 
 ## AZ-900 / AZ-104 domain mapping
 
